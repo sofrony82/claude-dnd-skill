@@ -754,6 +754,66 @@ class CampaignPinTests(unittest.TestCase):
         self.assertNotIn("ОТКАЗАНО", out)
         self.assertTrue((self.mine / "calendar.json").is_file(), out)
 
+    # ── other ways out: arguments that are paths, and glob patterns ──────
+    def test_xp_character_name_cannot_be_a_path(self):
+        """--campaign was pinned, but --characters went into the path as is."""
+        (self.mine / "characters").mkdir()
+        (self.theirs / "characters").mkdir()
+        sheet = self.theirs / "characters" / "bob.md"
+        sheet.write_text("**Level:** 1\n**XP:** 0 / 300\n", encoding="utf-8")
+        out = self.box.run("run_script", {"command": (
+            f"python3 {self.scripts}/xp.py award --campaign mine "
+            "--characters ../../../../2/campaigns/theirs/characters/bob "
+            "--type noncombat --difficulty easy")})
+        self.assertIn("Invalid character name", out)
+        self.assertIn("**XP:** 0 / 300", sheet.read_text(encoding="utf-8"), out)
+
+    def test_glob_cannot_climb_out_of_its_root(self):
+        (self.theirs / "state.md").write_text("x", encoding="utf-8")
+        for pattern in ("../../../*/campaigns/*/*", "../*", "**/../../*",
+                        "/etc/*", "~/*"):
+            with self.subTest(pattern=pattern):
+                out = self.box.run("glob_files", {"pattern": pattern})
+                self.assertIn("ОТКАЗАНО", out)
+                self.assertNotIn("theirs", out)
+
+    def test_glob_does_not_list_through_a_symlink(self):
+        (self.theirs / "state.md").write_text("x", encoding="utf-8")
+        (self.mine / "link").symlink_to(self.theirs)
+        self.assertNotIn("state.md", self.box.run("glob_files", {"pattern": "link/*"}))
+
+    def test_grep_does_not_read_through_a_symlink(self):
+        (self.theirs / "state.md").write_text("тайна", encoding="utf-8")
+        (self.mine / "link").symlink_to(self.theirs)
+        out = self.box.run("grep_files", {"pattern": "тайна", "path": str(self.mine)})
+        self.assertNotIn("тайна", out.replace("[совпадений нет: тайна]", ""))
+
+    def test_grep_finds_within_the_campaign(self):
+        (self.mine / "state.md").write_text("хиты: 8\nместо: пещера", encoding="utf-8")
+        out = self.box.run("grep_files", {"pattern": "пещ", "path": str(self.mine)})
+        self.assertEqual(out, "state.md:2\tместо: пещера")
+
+    def test_runaway_regex_is_killed(self):
+        """A backtracking pattern must cost the turn seconds, not a core forever."""
+        (self.mine / "state.md").write_text("a" * 60, encoding="utf-8")
+        old, self.sb.GREP_TIMEOUT = self.sb.GREP_TIMEOUT, 1
+        try:
+            out = self.box.run("grep_files", {"pattern": "(a|a)*b", "path": str(self.mine)})
+        finally:
+            self.sb.GREP_TIMEOUT = old
+        self.assertIn("не уложился", out)
+
+    def test_scripts_do_not_see_the_secrets(self):
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "t",
+                                          "NB_STUDIO_API_KEY": "k"}):
+            env = self.sb._script_env(self.mine)
+        self.assertNotIn("TELEGRAM_BOT_TOKEN", set(env))
+        self.assertNotIn("NB_STUDIO_API_KEY", set(env))
+        self.assertIn("PATH", env)
+        self.assertEqual(env["DND_CAMPAIGN_ROOT"], str(self.sb.script_root(self.mine)))
+
 
 class NarrationHygieneTests(unittest.TestCase):
     """Text on its way to a player, from the DeepSeek loop.

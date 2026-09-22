@@ -35,7 +35,8 @@ from claude_agent_sdk import (
 
 from config import DND_SKILL_DIR, EFFORT, MAX_TURNS, MODEL, MODULE_DIR
 from sandbox import (  # noqa: F401 — ALLOWED_SCRIPTS is re-exported
-    ALLOWED_SCRIPTS, _under, bash_allowed, check_command, script_root)
+    ALLOWED_SCRIPTS, _under, bash_allowed, check_command, pattern_escapes,
+    script_root)
 
 log = logging.getLogger("dm")
 
@@ -61,6 +62,9 @@ class DMSession:
     async def _can_use_tool(self, tool: str, params: dict, ctx):
         if tool in ("Read", "Glob", "Grep"):
             target = params.get("file_path") or params.get("path") or str(self.campaign_dir)
+            if tool == "Glob" and pattern_escapes(params.get("pattern", "")):
+                return PermissionResultDeny(
+                    message="Шаблон Glob не может выходить за каталог поиска ('..').")
             if _under(target, self.campaign_dir) or _under(target, MODULE_DIR) \
                     or _under(target, DND_SKILL_DIR):
                 return PermissionResultAllow()

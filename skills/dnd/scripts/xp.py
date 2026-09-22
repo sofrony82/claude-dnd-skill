@@ -177,9 +177,15 @@ def _next_level_xp(current_level: int) -> int:
 
 def _find_char_path(campaign: str, char_name: str) -> pathlib.Path:
     char_dir = CAMPAIGNS_DIR / campaign / "characters"
+    # A character name is a file stem, never a path. Without this,
+    # `--characters ../../<other>/characters/bob` walks out of the campaign and
+    # awards XP on somebody else's sheet — the --campaign pin does not cover it.
+    if not char_name or re.search(r"[/\\\0]|\.\.", char_name):
+        raise FileNotFoundError(f"Invalid character name '{char_name}': "
+                                "use the name, not a path.")
     # Try exact match first
     exact = char_dir / f"{char_name.lower()}.md"
-    if exact.exists():
+    if exact.exists() and exact.resolve().parent == char_dir.resolve():
         return exact
     # Case-insensitive search
     if char_dir.exists():

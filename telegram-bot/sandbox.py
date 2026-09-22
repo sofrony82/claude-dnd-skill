@@ -26,7 +26,8 @@ count. Both say plainly that output was cut, because a model that thinks it saw
 a whole file will confidently narrate from the half it got.
 """
 
-import fnmatch
+import json
+import os
 import pathlib
 import re
 import shlex
@@ -45,6 +46,13 @@ MAX_READ_CHARS = 60_000     # ~24k tokens of Cyrillic
 MAX_GREP_HITS = 80
 MAX_GLOB_HITS = 200
 SCRIPT_TIMEOUT = 30         # a dice roll that hangs must not hang the turn
+GREP_TIMEOUT = 10           # a runaway regex is killed, not waited out
+GREP_WORKER = pathlib.Path(__file__).resolve().parent / "grep_worker.py"
+
+# Variables the helper scripts have no business seeing. config.py loads .env
+# into os.environ, so without this every script — and any traceback it prints
+# back to the model — would carry the bot token and the API key.
+_SECRET_ENV = re.compile(r"TOKEN|KEY|SECRET|PASSW|CREDENTIAL|^TELEGRAM_", re.I)
 
 
 def _under(path, root: pathlib.Path) -> bool:
@@ -58,6 +66,17 @@ def _under(path, root: pathlib.Path) -> bool:
         return True
     except (ValueError, OSError):
         return False
+
+
+def pattern_escapes(pattern: str) -> bool:
+    """True if a glob pattern could match outside the directory it runs in.
+
+    Only the search root is checked against the allowed roots, so the pattern
+    must not climb out of it: `../../../*/campaigns/*/*` from a campaign lists
+    every other player's files.
+    """
+    p = pathlib.PurePosixPath(str(pattern).replace("\\", "/"))
+    return p.is_absolute() or str(pattern).startswith("~") or ".." in p.parts
 
 
 def bash_allowed(cmd: str) -> bool:
@@ -392,9 +411,16 @@ class Sandbox:
         if not self._readable(root):
             self.denials += 1
             return f"ОТКАЗАНО: поиск вне разрешённых каталогов ({root})."
+        if pattern_escapes(pattern):
+            self.denials += 1
+            return ("ОТКАЗАНО: шаблон не может выходить за каталог поиска "
+                    "('..', абсолютные пути). Укажи каталог в root.")
         if not root.is_dir():
             return f"ОШИБКА: каталога нет: {root}"
-        hits = sorted(str(m.relative_to(root)) for m in root.glob(pattern) if m.is_file())
+        # A symlink inside a root can still point out of it; read_file would
+        # refuse such a file, so glob does not list it either.
+        hits = sorted(str(m.relative_to(root)) for m in root.glob(pattern)
+                      if m.is_file() and self._readable(m))
         if not hits:
             return f"[совпадений нет: {pattern} в {root}]"
         out = hits[:MAX_GLOB_HITS]
@@ -409,36 +435,27 @@ class Sandbox:
         if not self._readable(target):
             self.denials += 1
             return f"ОТКАЗАНО: поиск вне разрешённых каталогов ({target})."
-        try:
-            rx = re.compile(pattern, re.I)
-        except re.error:
-            rx = re.compile(re.escape(pattern), re.I)
-
         ctx = max(0, min(int(a.get("context") or 0), 6))
         files = [target] if target.is_file() else [
             f for f in sorted(target.rglob("*.md")) if f.is_file()]
+        files = [[str(f), f.name if f == target else str(f.relative_to(target))]
+                 for f in files if self._readable(f)]
 
-        out, hits = [], 0
-        for f in files:
-            try:
-                lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
-            except OSError:
-                continue
-            for i, line in enumerate(lines):
-                if not rx.search(line):
-                    continue
-                hits += 1
-                if hits > MAX_GREP_HITS:
-                    out.append(f"[…обрезано на {MAX_GREP_HITS} совпадениях — уточни запрос]")
-                    return "\n".join(out)
-                name = f.name if f == target else str(f.relative_to(target))
-                if ctx:
-                    lo, hi = max(0, i - ctx), min(len(lines), i + ctx + 1)
-                    out.append(f"--- {name}:{i + 1}")
-                    out.extend(f"{j + 1}\t{lines[j]}" for j in range(lo, hi))
-                else:
-                    out.append(f"{name}:{i + 1}\t{line.strip()}")
-        return "\n".join(out) if out else f"[совпадений нет: {pattern}]"
+        # The regex runs in a child process: see grep_worker.py for why.
+        job = {"pattern": pattern, "files": files, "ctx": ctx,
+               "max_hits": MAX_GREP_HITS}
+        try:
+            r = subprocess.run(
+                [_python(), str(GREP_WORKER)], input=json.dumps(job),
+                capture_output=True, encoding="utf-8", errors="replace",
+                timeout=GREP_TIMEOUT, shell=False, env=_script_env(self.campaign_dir),
+            )
+        except subprocess.TimeoutExpired:
+            return (f"ОШИБКА: поиск не уложился в {GREP_TIMEOUT} с — шаблон "
+                    "слишком сложный. Упрости регулярное выражение или ищи подстроку.")
+        if r.returncode != 0:
+            return f"ОШИБКА поиска: {(r.stderr or '').strip()[-500:]}"
+        return r.stdout
 
     def _t_roll_dice(self, a: dict) -> str:
         notation = str(a.get("notation", "")).strip()
@@ -495,9 +512,8 @@ def script_root(campaign_dir: pathlib.Path) -> pathlib.Path:
 
 
 def _script_env(campaign_dir: pathlib.Path) -> dict:
-    """The environment the helper scripts run in."""
-    import os
-    return {**os.environ,
+    """The environment the helper scripts run in: ours, minus the secrets."""
+    return {**{k: v for k, v in os.environ.items() if not _SECRET_ENV.search(k)},
             "DND_CAMPAIGN_ROOT": str(script_root(campaign_dir)),
             "DND_DICE_PHYSICAL": "0"}
 
