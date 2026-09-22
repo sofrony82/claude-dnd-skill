@@ -47,6 +47,7 @@ from config import (
     HISTORY_TURNS,
     SAVE_REMIND_TURNS,
 )
+import dice_log
 import usage
 from sandbox import Sandbox, tool_schemas
 
@@ -70,6 +71,15 @@ NUDGE = ("Ты не сказал игроку ничего. Опиши резу�
          "по-русски: что произошло, что видит и слышит персонаж, чем кончился "
          "раунд. Если нужный бросок ещё не сделан — сделай его через roll_dice, "
          "но закончи ход рассказом игроку.")
+
+# Added to the nudge when the turn has already rolled. Without it a retry
+# starts from scratch and rolls again: in the 2026-09-22 session a zombie's
+# critical hit and a ghoul's claw were rolled, the reply then ran out of tokens
+# reasoning, and the narration that finally came told the player it was their
+# turn — those two rolls, which would have dropped the character, never landed.
+ROLLS_MADE = ("\n\nВ этом ходу уже брошено — это окончательные результаты, "
+              "игрок увидит их под твоим ответом:\n{rolls}\n"
+              "Не бросай их заново: расскажи, чем они кончились.")
 
 # A reply cut off by the token limit ends mid-sentence in front of the player.
 # Ask for the rest, a bounded number of times, and glue it on.
@@ -137,7 +147,11 @@ def _describe_call(name: str, args: dict, result) -> str:
     Everything else gets its target and the first line of the result.
     """
     if name == "roll_dice":
-        what = f"{args.get('notation', '')} «{args.get('label', '')}»"
+        # Every line: an advantage roll's second die is on the second line.
+        secret = (" (тайный)" if str(args.get("hidden", "")).strip().lower()
+                  in ("true", "1", "yes") else "")
+        return (f"{name} {args.get('notation', '')} «{args.get('label', '')}»{secret}"
+                f" -> {' | '.join(str(result).strip().splitlines())}")
     else:
         what = str(args.get("path") or args.get("pattern") or args.get("command") or "")
     first = (str(result).strip().splitlines() or [""])[0]
@@ -170,6 +184,8 @@ class DSSession:
         self.turns_unsaved = 0
         # Completions left in the current player turn, nudges included.
         self._steps_left = 0
+        # Every roll the last turn made, for the dice log under the narration.
+        self.last_rolls: list = []
 
     # ── lifecycle ────────────────────────────────────────────────────────
     async def start(self):
@@ -232,6 +248,8 @@ class DSSession:
             self._trim()
 
             writes_before = len(self.sandbox.writes)
+            rolls_before = len(self.sandbox.rolls)
+            self.last_rolls = []
             narration, preamble = [], []
             self._steps_left = DS_MAX_STEPS
             await self._run(narration, preamble, on_progress)
@@ -246,8 +264,13 @@ class DSSession:
                     break
                 log.warning("chat %s: empty narration, nudging (%s/%s)",
                             self.chat_id, attempt + 1, NUDGE_LIMIT)
-                self.history.append({"role": "user", "content": NUDGE})
+                made = self.sandbox.rolls[rolls_before:]
+                nudge = NUDGE + (ROLLS_MADE.format(rolls=dice_log.for_dm(made))
+                                 if made else "")
+                self.history.append({"role": "user", "content": nudge})
                 await self._run(narration, preamble, on_progress)
+
+            self.last_rolls = self.sandbox.rolls[rolls_before:]
 
             if "state.md" in self.sandbox.writes[writes_before:]:
                 self.turns_unsaved = 0
@@ -302,6 +325,15 @@ class DSSession:
             glue = False
 
             if not calls:
+                # Cut with nothing written means the whole reply went on
+                # reasoning, which is never sent back — "continue from where
+                # you stopped" then has nowhere to continue from, and the model
+                # starts the turn over. Return empty-handed; the nudge in `ask`
+                # tells it which dice it already rolled.
+                if msg.get("finish_reason") == "length" and not content:
+                    log.warning("chat %s: reply spent on reasoning, nothing said",
+                                self.chat_id)
+                    return
                 if msg.get("finish_reason") == "length" and continues < CONTINUE_LIMIT:
                     continues += 1
                     log.warning("chat %s: reply cut by the token limit, asking to "

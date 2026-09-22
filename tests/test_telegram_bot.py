@@ -281,6 +281,99 @@ class SavePointTests(unittest.TestCase):
         self.assertIn("открываю сундук", prompt)
 
 
+class PromptTests(unittest.TestCase):
+    """What the DM is told depends on the table it is running."""
+
+    @classmethod
+    def setUpClass(cls):
+        _import("config")
+        cls.p = _import("prompts")
+
+    def build(self, n):
+        import tempfile
+        d = pathlib.Path(tempfile.mkdtemp())
+        party = "\n".join(f"- P{i} — Эльф Волшебник (лист: characters/p{i}.md)"
+                          for i in range(n))
+        return self.p.build_system_prompt(party, d, d, "deepseek")
+
+    def test_small_party_gets_scaling_rules(self):
+        """A solo wizard met the four-player harpy fight as printed and fell twice."""
+        solo = self.build(1)
+        self.assertIn("МАЛЫЙ ОТРЯД — 1 ИЗ 4", solo)
+        self.assertIn("Одиночке", solo)
+        self.assertIn("МАЛЫЙ ОТРЯД — 3 ИЗ 4", self.build(3))
+        self.assertNotIn("МАЛЫЙ ОТРЯД", self.build(4))
+
+    def test_combat_checklist_closes_the_prompt(self):
+        self.assertTrue(self.build(1).rstrip().endswith(
+            self.p.COMBAT_CHECKLIST.strip()))
+
+    def test_player_is_told_the_dice_are_shown(self):
+        self.assertIn("hidden=true", self.build(2))
+
+
+class DiceLogTests(unittest.TestCase):
+    """The dice log the bot puts under every DM turn — see dice_log.py."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.d = _import("dice_log")
+
+    def roll(self, output, label="Атака", hidden=False):
+        return {"notation": "d20", "label": label, "output": output, "hidden": hidden}
+
+    def test_summaries_of_every_dice_py_shape(self):
+        s = self.d.summarize
+        self.assertEqual(s("Roll: 9 + 3 = 12"), "9 + 3 = 12")
+        self.assertEqual(s("Roll: 20 = 20  *** CRITICAL HIT (nat 20)! ***"),
+                         "20 — натуральная 20")
+        self.assertEqual(s("Roll: 1 - 1 = 0  *** FUMBLE (nat 1)! ***"),
+                         "1 - 1 = 0 — натуральная 1")
+        self.assertEqual(s("Rolls: [4, 1] + 2 = 7"), "4 + 1 + 2 = 7")
+        self.assertEqual(s("Rolls: [7] = 7"), "7")
+        self.assertEqual(s("[ADV] Roll A: [14] + 3 = 17\n[ADV] Roll B: [6] + 3 = 9\n"
+                           "Takes roll A → Total: 17"),
+                         "14 и 6 (преимущество) + 3 → 17")
+        self.assertEqual(s("[DIS] Roll A: [19] = 19\n[DIS] Roll B: [2] = 2\n"
+                           "Takes roll B → Total: 2"), "19 и 2 (помеха) → 2")
+        self.assertEqual(s("Rolls: [6, 5, 3, 1]  (dropped: [1])\n"
+                           "Kept (kh3): [6 + 5 + 3] = 14"), "6 + 5 + 3 = 14")
+        self.assertEqual(s("ОШИБКА: notation пуст"), "бросок не удался")
+
+    def test_real_advantage_output_reads_left_to_right(self):
+        """dice.py used to print `[14] = 17 + 3`; the DM copied it as nonsense."""
+        import re
+        import subprocess
+        out = subprocess.run(
+            [sys.executable, str(REPO / "skills" / "dnd" / "scripts" / "dice.py"),
+             "d20+3 adv"], capture_output=True, encoding="utf-8",
+            env={"DND_DICE_PHYSICAL": "0", "PYTHONIOENCODING": "utf-8",
+                 "PATH": "/usr/bin:/bin"}).stdout
+        self.assertRegex(out, r"Roll A: \[\d+\] \+ 3 = \d+")
+        self.assertRegex(self.d.summarize(out), r"^\d+ и \d+ \(преимущество\) \+ 3 → \d+$")
+
+    def test_secret_rolls_show_that_they_happened_and_nothing_else(self):
+        lines = self.d.lines([self.roll("Roll: 3 + 2 = 5", "Скрытность упыря", True)])
+        self.assertEqual(lines, [self.d.HIDDEN])
+        self.assertIn("Скрытность упыря", self.d.for_dm(
+            [self.roll("Roll: 3 + 2 = 5", "Скрытность упыря", True)]))
+
+    def test_html_is_escaped_and_collapsed(self):
+        out = self.d.to_html([self.roll("Roll: 9 + 3 = 12", "<b>Атака</b>")])
+        self.assertTrue(out.startswith("<blockquote expandable>"))
+        self.assertIn("&lt;b&gt;Атака&lt;/b&gt;: 9 + 3 = 12", out)
+
+    def test_no_rolls_no_message(self):
+        self.assertEqual(self.d.to_html([]), "")
+        self.assertEqual(self.d.text([]), "")
+
+    def test_a_runaway_turn_is_capped(self):
+        many = [self.roll("Roll: 5 = 5")] * (self.d.MAX_LINES + 7)
+        lines = self.d.lines(many)
+        self.assertEqual(len(lines), self.d.MAX_LINES + 1)
+        self.assertEqual(lines[-1], "…и ещё 7")
+
+
 class CampaignTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -678,6 +771,15 @@ class SandboxTests(unittest.TestCase):
         self.assertEqual(len(self.box.rolls), 1)
         self.assertEqual(self.box.rolls[0]["notation"], "d20+3")
 
+    def test_hidden_roll_is_marked_and_only_when_asked(self):
+        """A string "false" from model-written JSON must not hide a roll."""
+        self.box.run("roll_dice", {"notation": "d20+2", "label": "Скрытность",
+                                   "hidden": True})
+        self.box.run("roll_dice", {"notation": "d20", "label": "Атака",
+                                   "hidden": "false"})
+        self.box.run("roll_dice", {"notation": "d20", "label": "Спасбросок"})
+        self.assertEqual([r["hidden"] for r in self.box.rolls], [True, False, False])
+
     def test_tool_schemas_expose_no_general_shell(self):
         names = {s["function"]["name"] for s in self.sb.tool_schemas(self.campaign)}
         self.assertIn("roll_dice", names)
@@ -955,6 +1057,36 @@ class DSLoopTests(unittest.TestCase):
         self.assertEqual(out, "Она нависает над тобой. Кость опускается на доски "
                               "рядом с головой.")
         self.assertEqual(seen[1][-1]["content"], self.ds.CONTINUE)
+
+    def test_reply_spent_on_reasoning_is_nudged_with_its_rolls(self):
+        """Nothing written is nothing to continue: the retry gets the dice instead.
+
+        2026-09-22 19:38: a zombie crit and a ghoul claw were rolled, three
+        completions ran out reasoning, "continue from where you stopped" twice
+        had nowhere to continue from, and the narration skipped both rolls.
+        """
+        seen = self.script(
+            _msg("", calls=[("roll_dice", '{"notation": "d20+3", '
+                             '"label": "Атака зомби"}')]),
+            _msg("", finish="length"),
+            _msg("Кулак зомби врезается тебе в плечо."))
+        out = self.ask()
+        self.assertEqual(out, "Кулак зомби врезается тебе в плечо.")
+        nudge = seen[2][-1]["content"]
+        self.assertNotEqual(nudge, self.ds.CONTINUE)
+        self.assertIn("Атака зомби", nudge)
+        self.assertIn("окончательные", nudge)
+        self.assertEqual(len(self.s.sandbox.rolls), 1, "the retry rolled again")
+
+    def test_last_rolls_are_this_turns_only(self):
+        self.script(_msg("", calls=[("roll_dice", '{"notation": "d20", "label": "первый"}')]),
+                    _msg("Раз."),
+                    _msg("", calls=[("roll_dice", '{"notation": "d6", "label": "второй"}')]),
+                    _msg("Два."))
+        self.ask()
+        self.assertEqual([r["label"] for r in self.s.last_rolls], ["первый"])
+        self.ask()
+        self.assertEqual([r["label"] for r in self.s.last_rolls], ["второй"])
 
     def test_continuation_is_bounded(self):
         cut = [_msg("часть", finish="length")] * (self.ds.CONTINUE_LIMIT + 1)

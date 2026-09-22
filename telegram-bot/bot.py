@@ -30,7 +30,7 @@ import os
 import pathlib
 import sys
 
-from telegram.error import NetworkError, TimedOut
+from telegram.error import BadRequest, NetworkError, TimedOut
 from telegram import (
     BotCommand,
     BotCommandScopeChat,
@@ -52,6 +52,7 @@ from telegram.ext import (
 import access
 import campaign
 import chat_lanes
+import dice_log
 import prompts
 import tg_format
 import transcript
@@ -139,8 +140,8 @@ WELCOME = (
     "Твой корабль подходит к острову, о котором ходят скверные слухи. "
     "Но сперва — кто сошёл на берег?\n\n"
     "<b>Сколько персонажей в отряде?</b>\n"
-    "<i>Модуль рассчитан на четверых. Меньше — тоже можно, "
-    "просто будет опаснее.</i>"
+    "<i>Модуль рассчитан на четверых. Меньше — тоже можно: "
+    "мастер ослабит встречи под отряд, но будет опаснее.</i>"
 )
 
 HELP = (
@@ -232,7 +233,8 @@ async def on_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ── output helpers ───────────────────────────────────────────────────────
-async def send_narration(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+async def send_narration(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str,
+                         rolls: list = ()):
     """Send DM prose: strip map markers, send the maps, chunk the rest."""
     chat_id = update.effective_chat.id
     clean, maps = tg_format.extract_maps(text)
@@ -245,6 +247,7 @@ async def send_narration(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
             text=tg_format.to_html(piece),
             parse_mode=constants.ParseMode.HTML,
         )
+    await send_rolls(update, context, rolls)
 
     # A map the player has already been shown is noise, and the DM re-emits the
     # marker more often than it means to — especially right after a restart,
@@ -257,6 +260,22 @@ async def send_narration(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
                 continue
             session.maps_shown.add(n)
         await send_map(update, context, n, quiet=True)
+
+
+async def send_rolls(update: Update, context: ContextTypes.DEFAULT_TYPE, rolls: list):
+    """Every roll of the turn, under the narration — see dice_log.py for why."""
+    body = dice_log.to_html(rolls)
+    if not body:
+        return
+    chat_id = update.effective_chat.id
+    transcript.append(campaign.campaign_dir(chat_id), BOT_SPEAKER, dice_log.text(rolls))
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=body,
+                                       parse_mode=constants.ParseMode.HTML)
+    except BadRequest as e:
+        # The narration is already out; a refused quote must not cost the turn.
+        log.warning("chat %s: dice log refused as HTML (%s), sending plain", chat_id, e)
+        await context.bot.send_message(chat_id=chat_id, text=dice_log.text(rolls))
 
 
 async def send_map(update: Update, context: ContextTypes.DEFAULT_TYPE,
@@ -338,11 +357,15 @@ async def run_turn(update: Update, context: ContextTypes.DEFAULT_TYPE, player_te
                 "Мастер поперхнулся — у меня что-то сломалось. "
                 "Попробуй повторить ход; если не выйдет, /start.")
             return
+    # Only the DeepSeek session collects them; the SDK path has no sandbox.
+    rolls = getattr(session, "last_rolls", None) or []
     if reply:
-        await send_narration(update, context, reply)
+        await send_narration(update, context, reply, rolls)
     else:
         await update.effective_message.reply_text(
             "Мастер промолчал. Повтори ход или уточни, что делаешь.")
+        # Dice that were rolled still count, whether or not the DM said so.
+        await send_rolls(update, context, rolls)
     # The DM wrote state.md this turn: everything logged so far is covered.
     if transcript.state_mtime(cdir) != saved_before:
         transcript.mark_saved(cdir)

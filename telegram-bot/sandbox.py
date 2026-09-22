@@ -247,13 +247,25 @@ def tool_schemas(campaign_dir: pathlib.Path) -> list:
                 "description": (
                     "ОБЯЗАТЕЛЬНЫЙ бросок костей через скрипт кампании. Любая проверка, атака, "
                     "спасбросок, урон или случайная таблица проходит здесь. Никогда не придумывай "
-                    "результат броска сам. Примеры notation: 'd20+5', '2d8+3', 'd20 adv', '4d6kh3'."
+                    "результат броска сам. Игрок видит под твоим ответом каждый бросок хода, "
+                    "поэтому бросок окончателен: не перебрасывай и не бросай наперёд. "
+                    "Примеры notation: 'd20+5', '2d8+3', 'd20 adv', '4d6kh3'."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "notation": {"type": "string", "description": "Кость и модификатор, например d20+5"},
                         "label": {"type": "string", "description": "Что бросаем, например 'Проверка Внимательности'"},
+                        "hidden": {
+                            "type": "boolean",
+                            "description": (
+                                "Тайный бросок: игрок увидит, что бросок был, но не его "
+                                "подпись и результат. Только для того, что персонаж не "
+                                "может знать: Скрытность врага, Проницательность, чей "
+                                "результат выдал бы ложь NPC. Атаки, урон, спасброски, "
+                                "спасброски от смерти и проверки по заявке игрока — "
+                                "никогда не тайные."),
+                        },
                     },
                     "required": ["notation"],
                 },
@@ -468,7 +480,10 @@ class Sandbox:
         if label:
             cmd += ["--label", label]
         out = self._exec(cmd)
-        self.rolls.append({"notation": notation, "label": label, "output": out})
+        # Arguments are model-written JSON: "false" as a string must not hide.
+        hidden = str(a.get("hidden", "")).strip().lower() in ("true", "1", "yes")
+        self.rolls.append({"notation": notation, "label": label, "output": out,
+                           "hidden": hidden})
         return out
 
     def _t_run_script(self, a: dict) -> str:

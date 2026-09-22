@@ -183,7 +183,15 @@ Everything else you type is your turn. Write freely, for the whole party
 («идём в храм, Дарин осматривает статую») or in character.
 
 Dice are rolled by `scripts/dice.py`, never imagined by the model, and the
-arithmetic is shown. Maps arrive as pictures when you first reach a location.
+arithmetic is shown. Under each DM turn the bot itself posts a collapsed
+"🎲 Броски за ход" quote listing every roll the turn made (`dice_log.py`), so a
+roll the narration skipped is visible as one; rolls the DM marks `hidden` (an
+enemy's Stealth) show only that a secret roll happened. Maps arrive as pictures
+when you first reach a location.
+
+With fewer than four characters the prompt tells the DM to scale encounters
+before a fight — fewer and weaker enemies, an NPC companion from Dragon's Rest,
+fair warning — since the module is written for four.
 
 Play is in a private chat only: one person runs the whole party, and the bot
 leaves any group or channel it is added to. Several players can play at once —
