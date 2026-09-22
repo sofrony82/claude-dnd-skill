@@ -42,3 +42,14 @@ venv/
 
 # macOS
 .DS_Store
+
+# Secrets — never commit (Telegram bot token, API keys, local env)
+.telegram_apikey
+.env
+**/.env
+!**/.env.example
+
+# Source modules the user owns + packs built from them (copyrighted third-party
+# adventure text — the repo ships the build pipeline, never the output).
+*.pdf
+telegram-bot/modules/

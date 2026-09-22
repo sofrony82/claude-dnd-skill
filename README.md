@@ -26,6 +26,10 @@ There are two ways to play, and they serve different needs:
 
 **Structured campaigns** — Use `/dm:dnd import` to drop in a pre-written source (official WotC modules, published third-party campaigns, or a custom DM-written document in PDF, markdown, DOCX, or plain text format). Claude reads and chunks the source, extracts the structure type (linear, hub-and-spoke, or faction-web), and builds all campaign files automatically — acts, chapters, key story beats, telegraph scenes, NPCs, factions, locations, and quest hooks. The campaign runs with enforced deterministic structure: required beats must land in each chapter, Claude telegraphs before delivering them, and steers with world pressure rather than walls when players drift. Drop in the Lost Mine of Phandelver and Claude will run it chapter by chapter with the same twelve DM standards applied to every scene.
 
+**Prepared module packs** — For a published adventure you intend to run more than once, `/dm:module-prep` converts the book *offline* into a **module pack**: markdown the DM reads at the table, maps as images players actually see, a combat-ready bestiary, and pre-generated characters. Deterministic scripts do the extraction — de-columning, page splitting, figure classification — so no agent parses a PDF mid-session, and a validator checks the result before anyone sits down. Packs are module-level, not campaign-level: several tables can run the same pack independently. See [Module Packs](#module-packs--offline-pdf-prep).
+
+**Play in Telegram** — A private-chat bot puts the same DM engine in a messenger, one person running the whole party. It asks who is at the table, builds their sheets from the pack's pregens, and opens the adventure; dice go through `dice.py`, maps arrive as photos, and the whole session is written to disk verbatim. See [Telegram Bot](#telegram-bot).
+
 Both modes share the same DM engine. The [twelve applied behavioral standards](https://github.com/neuralinitiative/claude-dnd-skill/blob/main/SKILL.md#what-makes-a-great-dm--applied-standards) are enforced as hard constraints in every session regardless of which mode you're in — improvised or structured, the DM improvises within situations, lets choices matter, makes every NPC a person, and controls pace deliberately.
 
 It also manages a deep web of campaign data without overloading the LLM — coherent and complete, without burning tokens on context that isn't needed yet:
@@ -60,6 +64,8 @@ If you're on Claude Code, you're in the right place.
 - <img src="skills/dnd/display/icons/crystal_ball.png" height="18"> **Dynamic narrative arc** — auto-generated at `/dm:dnd new` from the world's threat, factions, and setting; three acts, six beats defined by consequence not event; arc tracked across sessions, revised when players redirect the story, continued into a new arc when complete
 - <img src="skills/dnd/display/icons/spellbook.png" height="18"> **Campaign relationship graph** — typed-edge graph alongside the markdown campaign files, with verbatim source-anchors on every edge; `scene-context` query auto-pulled at `/dm:dnd load` to surface who-knows-whom in the current scene without re-reading full NPC files; designed to hold long-session continuity when context compaction strips files out of scope. Background research and the A/B replay study that motivated it: [`docs/research/graph/`](docs/research/graph/)
 - <img src="skills/dnd/display/icons/pack.png" height="18"> **Campaign import** — `/dm:dnd import` accepts PDF, markdown, DOCX, or plain text; extracts structure type, acts, chapters, key beats, telegraph scenes, NPCs, factions, and quest hooks; builds all campaign files automatically and keeps the full source as a lazily-loaded corpus so even a long module loads chapter by chapter
+- <img src="skills/dnd/display/icons/treasure.png" height="18"> **Module packs** — `/dm:module-prep` pre-parses a published adventure offline into reusable markdown + extracted maps + bestiary + pregens; deterministic scripts handle extraction, a validator enforces a per-session load budget, and provenance (source SHA-256, page ranges, page coverage) is recorded so you can tell what was extracted from what was inferred
+- <img src="skills/dnd/display/icons/chat.png" height="18"> **Telegram bot** — play in a private chat: guided party setup, maps as photos, real dice, verbatim transcript written to disk, and an explicit tool allowlist between internet input and the shell
 - <img src="skills/dnd/display/icons/helmet.png" height="18"> **Portable characters** — bring your character into any campaign; level up, grow your stat tree, and carry your inventory and loot — or start fresh each time
 - <img src="skills/dnd/display/icons/attack.png" height="18"> **Full D&D 5e mechanics** — initiative, attacks, saving throws, spell slots, XP, levelling up, short/long rests
 - <img src="skills/dnd/display/icons/chat.png" height="18"> **Atmospheric DM** — dark fantasy tone, distinct NPC voices, hidden rolls, a world that reacts to choices
@@ -110,6 +116,8 @@ The Flask server receives narration text, player actions, dice results, and char
 - Python 3.10+
 - `pip3 install flask flask-cors numpy cryptography` (display companion; numpy required for sound effects, cryptography for LAN TLS)
 - `pip3 install pymupdf` (campaign import from PDF — column-aware extraction so multi-column modules segment into chapters correctly; falls back to poppler's `pdftotext` if absent)
+- `pip3 install pymupdf` is **required** (not optional) for `/dm:module-prep` — the pack pipeline uses page geometry, font sizes and embedded-image metadata, none of which `pdftotext` exposes
+- `pip3 install -r telegram-bot/requirements.txt` (Telegram bot — `python-telegram-bot` and `claude-agent-sdk`; needs the `claude` CLI logged in)
 
 ---
 
@@ -175,6 +183,23 @@ The skill follows [semantic versioning](https://semver.org/): `MAJOR.MINOR.PATCH
 ```
 /dm:dnd import my-campaign path/to/module.pdf   # extract structure and build campaign files
 /dm:dnd load my-campaign                        # start a session — Claude enforces the arc
+```
+
+**Prepared module pack** — pre-parse a published adventure offline, once, and
+run it as often as you like ([details](#module-packs--offline-pdf-prep)):
+
+```
+/dm:module-prep path/to/module.pdf              # probe → extract → slice → assets → validate
+/dm:dnd load my-campaign                        # or play it in Telegram, below
+```
+
+**Play in Telegram** ([details](#telegram-bot)):
+
+```bash
+cd telegram-bot
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+cp .env.example .env            # add TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_USERS
+.venv/bin/python bot.py         # then send /start to your bot
 ```
 
 Once loaded, type naturally — no `/dm:dnd` prefix needed. The DM interprets everything as in-game action.
@@ -249,6 +274,224 @@ Arc beats are tracked at `/dm:dnd end` and marked complete via `/dm:dnd arc adva
 Populated by `/dm:dnd import` from the source material. Acts contain chapter-level key beats, telegraph scenes (setup scenes that naturally constrain choices toward each beat), and branching notes. Claude telegraphs before delivering any required beat, steers with world pressure rather than hard walls when players drift, and marks beats complete as each chapter resolves.
 
 The two arc types are mutually exclusive per campaign and fully compatible with all other systems — combat, XP, NPC attitudes, and display all behave identically regardless of arc type.
+
+---
+
+## Module Packs — offline PDF prep
+
+`/dm:dnd import` and `/dm:module-prep` both turn a published adventure into
+something Claude can run. They differ in **when** the parsing happens and
+**what you end up with**.
+
+| | `/dm:dnd import <name> <file>` | `/dm:module-prep <file>` |
+|---|---|---|
+| Runs | at import time, inside the play session | offline, before anyone sits down |
+| Who parses | Claude reads the source in ~4 000-word chunks | deterministic scripts extract; Claude only writes the semantic layer |
+| Output scope | **one campaign** | a reusable **module pack**, shared by every campaign that runs it |
+| Maps | not extracted | extracted as images **and** keyed text legends |
+| Pregens | not built | transcribed from the book, or built to the rules and marked inferred |
+| Bestiary / items | folded into campaign files | separate combat-ready references |
+| Validation | `corpus_check.py` — layout only | `module_check.py` — layout, load-time budget, page coverage, NPC/map consistency, encoding |
+| Provenance | source path in the session log | source SHA-256, per-chapter page ranges, % of pages assigned |
+| Re-running the same book | re-parses from scratch | reuses the pack; only campaign state is new |
+
+**Use `/dm:dnd import`** when you want to start playing a document now, once.
+**Use `/dm:module-prep`** when the adventure will be run more than once, when it
+has maps players should see, or when you want the extraction *checked* rather
+than trusted.
+
+Packs live in the data root, never in the repository — they contain the
+adventure's text almost verbatim, so the repo ships the pipeline and not the
+output:
+
+```
+$DND_CAMPAIGN_ROOT/modules/<id>/       # default: ~/.claude/dnd/modules/<id>/
+```
+
+### The pipeline
+
+Invoking the skill walks these five steps. Each is a real command you can run by
+hand, and each writes files the next one reads — so a failed run is resumable,
+not restartable.
+
+**1 — Probe before parsing anything.**
+
+```bash
+python3 skills/module-prep/scripts/pdf_probe.py adventure.pdf --out build/probe.json
+```
+
+Reports page count, writing-system profile, text-layer density, column verdict,
+body font size, **heading candidates**, figures with captions, page furniture,
+decorative glyph runs, image-only pages, and warnings. Read it in full — it
+decides everything downstream. A sparse text layer means the PDF is a scan and
+this pipeline will not help (it does not OCR).
+
+Three independent filters separate a figure from page furniture, because no
+single one suffices:
+
+| Filter | Catches |
+|---|---|
+| Byte-identical across ≥15% of pages | backgrounds, borders, stat-block frames — even re-embedded under a fresh xref per page |
+| Below a pixel/byte floor | icons, rules, flat vector frames |
+| Placed larger than the page | tiled or clipped background texture |
+
+Headings are found by **font size** (1.15× the body size), not by pattern, so it
+works in any language. Spans on one line are joined with word gaps rebuilt from
+geometry — PDF writers often express a space as position rather than a space
+character, and without that fix headings come back as `Ch1TheDrownedSailors`.
+
+**2 — Extract a page-addressable corpus.**
+
+```bash
+python3 skills/module-prep/scripts/pdf_extract.py adventure.pdf --out build/
+```
+
+Writes `build/pages/pNNN.txt` (one file per page, de-columned into reading
+order), `build/headings.tsv`, `build/full.txt`, `build/extract.json`. Per-page
+rather than one blob, because chapter files are later measured back against
+these pages to prove nothing was dropped.
+
+Three cleanup passes run in order, each catching what the previous cannot:
+
+1. **Drop caps by size** (≥3× body, ≤2 glyphs) — judged by size, not alphabet, so
+   it catches a Latin `H` opening a Russian chapter and never eats a room code
+   like `B1`.
+2. **Foreign-script tokens** — whole words in a writing system the document
+   does not use.
+3. **Rare-script characters** — any writing system under 1% of the document is
+   deleted outright. This is the pass that removes an ornament glyph *fused onto
+   a real word* (`Caves)` plus a stray mark reads as mostly-Latin and survives
+   passes 1 and 2).
+
+Pass `--keep-garbled` to disable all three when diagnosing a bad extraction.
+
+**3 — Plan the chapters and slice them.**
+
+Read `build/headings.tsv`, then write one line per chapter:
+
+```
+front|How to run this adventure|1-5
+1.1|Chapter 1. The Monastery|6-15
+app-b|Appendix B. Creatures|38-49
+```
+
+```bash
+python3 skills/module-prep/scripts/module_build.py \
+  --build build/ --pack ~/.claude/dnd/modules/<id>/ \
+  --plan plan.txt --title "<Adventure Title>"
+```
+
+Writes `source/<id>.md` with a provenance header, `source-index.md`, and
+`build-manifest.json`. It prints **coverage** — pages assigned, pages missing,
+pages in more than one chapter. Every page should be assigned exactly once;
+anything else is a bug in the plan, not an acceptable loss. Front matter and
+appendices are chapters too. Split anything over ~12 000 words at a scene break,
+since a single giant chapter is the one remaining way a structured campaign
+bloats a load.
+
+**4 — Pull the images.**
+
+```bash
+python3 skills/module-prep/scripts/pdf_assets.py adventure.pdf \
+  --out ~/.claude/dnd/modules/<id>/ --render-pages 50,51 --dpi 200
+```
+
+Reuses the probe's classification wholesale, so the two can never disagree about
+what counts as a map. Maps land in `maps/`, illustrations in `art/`, whole
+rendered pages in `plates/`, with an `assets.json` manifest. Use
+`--render-pages` for the image-only pages the probe flagged — usually character
+sheets or handouts, whose content has to be read with vision and transcribed.
+
+**5 — Write the semantic layer, then validate.**
+
+This is the part only a model can do, and the skill states the rules it works
+under: invent nothing (anything not in the source is omitted or marked
+`> INFERRED:` with its basis), copy names and room codes character-for-character,
+cite pages, and verify every number twice. Artifacts are written one per file so
+they can be produced in parallel and checked independently.
+
+```bash
+python3 skills/module-prep/scripts/module_check.py --pack ~/.claude/dnd/modules/<id>/
+```
+
+Exit 0 clean, 1 problems found. Each check maps to a way a pack fails at the
+table:
+
+| Check | Failure it prevents |
+|---|---|
+| Required files present and non-empty | the DM asks for something that is not there, mid-scene |
+| Load-time word budget | every session pays context for what it does not need |
+| Every indexed NPC has a full entry | the DM voices a character with no motivation or secret |
+| `arc.md` → `source/*.md` resolve | a chapter the arc points at and cannot open |
+| Page coverage | adventure text that exists but is unreachable |
+| Map image ↔ legend pairing | a map described to players that cannot be shown |
+| UTF-8 valid, no `U+FFFD`, no placeholders | `<name>` reaching a player as canon |
+
+### What a pack contains
+
+```
+~/.claude/dnd/modules/<id>/
+├── README.md              # provenance, contents, what was inferred, known gaps
+├── build-manifest.json    # source SHA-256, chapter plan, page coverage
+├── world.md               # load-time core — read in full at session start
+├── npcs.md                # INDEX TABLE ONLY — one row per NPC
+├── npcs-full.md           # full entries, read per-NPC on demand
+├── arc.md                 # act/chapter tree, key beats, telegraph scenes
+├── state-seed.md          # starting Current Situation / World State
+├── bestiary.md            # stat blocks, combat-ready, index table first
+├── items.md               # magic items + a "where the treasure is" table
+├── maps/
+│   ├── map-N-pNNN.jpeg    # the image players are shown
+│   ├── map-N.md           # keyed legend + a "DM only" secrets section
+│   └── README.md          # map → chapter → when to reveal
+├── pregens/*.md           # pre-generated characters, one per file
+├── source/<id>.md         # VERBATIM module text, one file per chapter (lazy)
+├── source-index.md        # chapter id → file → pages → word count
+├── art/ · plates/         # illustrations; whole rendered pages
+└── build/                 # the extraction intermediate, kept for re-checking
+```
+
+**The load-time contract.** `world.md` + `npcs.md` + `arc.md` are read at every
+session start; everything else is read on demand. Their combined budget is
+capped at roughly 11 500 words (~17k tokens) — a standing cost for the hub of a
+full adventure that still leaves the session almost all of its context. A pack
+that violates it — a 20 KB `npcs.md`, a chapter holding half the book — pays
+that cost on every session, forever. `module_check.py` enforces it rather than
+trusting the prompt.
+
+### Worked example
+
+*Dragons of Stormwreck Isle*, Russian translation, 52 pages, no PDF bookmarks,
+two-column, drop caps rendered through a symbol font:
+
+```
+pdf_probe    → 213 heading candidates · 5 maps auto-captioned · 3 image-only pages
+               29 page-furniture images filtered · 15 pages of glyph noise flagged
+pdf_extract  → 52 pages · 23 256 words · one rare script (thai) deleted as noise
+module_build → 8 chapters · coverage 52/52 pages, no page in two chapters
+pdf_assets   → 5 maps · 18 illustrations · 2 rendered plates (the one pregen sheet
+               the book ships, as images)
+semantic     → 49 NPCs indexed and detailed · 5 map legends · bestiary · items
+               · 5 pregens (1 transcribed from the plates, 4 built to SRD 5.1
+               and marked inferred)
+module_check → OK, 0 warnings
+```
+
+The verification pass over that pack found real errors in otherwise
+plausible-looking files: a population count of "three humans" where the source
+says two, an invented certainty about where an NPC had gone when the book says
+only that another *suspects* it, a Latin `A5` where the source uses a Cyrillic
+`А5`, four wrong page citations, and one omitted subsystem. Plausibility is
+exactly the failure mode, which is why the check is adversarial and not a
+proofread.
+
+### Doing the next adventure
+
+The skill is the reusable artifact — `skills/module-prep/SKILL.md` is the
+procedure, `SKILL-scripts.md` the flags and tuning constants. Point it at the
+next book and it runs the same five steps. Non-PDF sources (`.md`, `.txt`,
+`.docx`) skip steps 1–2 — there is no layout to recover — then continue from the
+semantic layer.
 
 ---
 
@@ -639,6 +882,176 @@ The server buffers the last 60 text chunks to disk (`text_log.json`). Reconnecti
 
 ---
 
+## Telegram Bot
+
+A private-chat front end for the same DM engine, in `telegram-bot/`. One person
+plays the whole party — which is what a starter module suggests for a small
+table — and the DM runs from a [prepared module pack](#module-packs--offline-pdf-prep),
+so the agent never parses a PDF during play.
+
+```
+Telegram ──▶ bot.py ──▶ ClaudeSDKClient (one long-lived agent per chat)
+                         ├─ system prompt: DM standards + pack layout (prompts.py)
+                         ├─ tools: Read / Write / Edit / Glob / Grep / Bash,
+                         │         every call gated by an allowlist (dm_engine.py)
+                         ├─ reads:  ~/.claude/dnd/modules/<id>/       (pack, read-only)
+                         └─ writes: ~/.claude/dnd/campaigns/tg-<chat_id>/
+```
+
+The agent keeps its conversation across turns, so continuity costs nothing. What
+must survive a restart lives in files, not in the conversation.
+
+### Setup
+
+```bash
+cd telegram-bot
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+cp .env.example .env          # then fill in TELEGRAM_BOT_TOKEN
+```
+
+The token is resolved in this order, first hit wins: `$TELEGRAM_BOT_TOKEN`, then
+`telegram-bot/.env`, then `<repo>/.telegram_apikey` (the bare token on one
+line). All three are gitignored. Importing `config.py` never requires a token —
+resolution is lazy, so tests and tooling do not need a live secret.
+
+You also need the `claude` CLI installed and logged in; the SDK drives it, and
+billing follows your Claude subscription.
+
+Verify the pack before starting:
+
+```bash
+python3 skills/module-prep/scripts/module_check.py --pack ~/.claude/dnd/modules/stormwreck-isle
+```
+
+**Set `TELEGRAM_ALLOWED_USERS`.** Empty means anyone who finds the bot plays on
+your Claude quota. Put your numeric Telegram id there (ask
+[@userinfobot](https://t.me/userinfobot)); comma-separate several.
+
+### Run
+
+```bash
+.venv/bin/python bot.py                              # foreground
+nohup .venv/bin/python bot.py >> bot.log 2>&1 &      # background
+```
+
+Then open the bot in Telegram and send `/start`.
+
+A **single-instance lock** (`$TMPDIR/dnd-telegram-bot.lock`) refuses a second
+start with the pid of the first. This is not a nicety: Telegram allows exactly
+one `getUpdates` consumer per token, and a second one does not queue — it kills
+the first with a `Conflict` and leaves a process alive but deaf, which looks
+identical to a working bot.
+
+### Playing
+
+`/start` asks how many characters you want (1–5), then walks you through picking
+each from the pack's pregenerated characters and naming them. It builds their
+sheets, seeds the campaign, and opens the adventure. If a campaign already
+exists it offers **Continue** or **Start over** instead.
+
+| Command | |
+|---|---|
+| `/start` | begin, or resume an existing campaign |
+| `/party` | who is in the party |
+| `/sheet [name]` | character sheet, read from the files rather than from memory |
+| `/map [n]` | show a map — the current one, or map `n` |
+| `/recap` | where you are and what is going on |
+| `/save` | flush state, sheets and the session journal to disk |
+| `/reset` | wipe the campaign and start over |
+| `/help` | the list above |
+
+Everything else you type is your turn — written freely for the whole party
+("we head for the temple, Darin examines the statue") or in character.
+
+Dice are rolled by `scripts/dice.py` and never imagined by the model; the
+arithmetic is shown. Maps arrive as photos the first time you reach a location
+— the DM emits a `[[map:N]]` marker, the bot strips it, sends the image, and
+**remembers it was sent** so a re-emitted marker is not a duplicate. An explicit
+`/map N` always sends.
+
+### Where everything is written
+
+Three separate records, because they answer different questions:
+
+| File | What it holds | When written |
+|---|---|---|
+| `<campaign>/raw-log.md` | **verbatim transcript** — every player line (commands included), every DM reply, every map sent | append-only, automatically, every turn |
+| `<campaign>/session-log.md` | the DM's own narrative journal — what happened, what it cost, what is open | on `/save` |
+| `<campaign>/state.md` | current scene, party, quests, world state | rewritten at scene boundaries and on `/save` |
+| `<campaign>/characters/*.md` | HP, slots, inventory, XP, level | as they change |
+| `<campaign>/party.json` | who is at the table, which pregens, which module | at party creation |
+| wherever you redirect stdout | process log: startup, session connects, tool denials, tracebacks | continuously |
+
+`raw-log.md` uses the same `> Speaker:` format a person gets by copying a
+Telegram chat, so a hand-saved export and the bot's own log are the same
+document and append cleanly to each other. Transcript failures never interrupt
+play — a game that stops because its logger could not write is worse than a game
+with a gap in its log.
+
+The distinction that matters: **`state.md` is overwritten as the game moves on,
+so it is not history.** `raw-log.md` is the history.
+
+```
+~/.claude/dnd/campaigns/tg-<chat_id>/
+├── party.json
+├── state.md
+├── session-log.md
+├── raw-log.md            ← verbatim, append-only
+└── characters/*.md
+```
+
+Delete the directory (or `/reset`) to start over. The module pack is untouched
+by play, so several chats run the same adventure independently.
+
+### Security
+
+The bot takes input from the open internet and hands it to an agent that can run
+shell commands, so tool use is gated by an **explicit allowlist**
+(`dm_engine.py`) rather than run in a bypass mode:
+
+- **Read / Glob / Grep** — only inside the campaign directory, the module pack, and the skill
+- **Write / Edit** — only inside the campaign directory; the pack is read-only
+- **Bash** — only `python3 <skill>/scripts/<allowed>.py …`, matched by *resolved*
+  absolute path, with shell metacharacters (`;` `|` `&` backtick `$`) refused
+  outright so the allowlist cannot be walked around by chaining
+- everything else is denied with a reason the agent can read and route around
+
+One non-obvious trap, worth knowing if you modify this: **`allowed_tools` must
+stay empty.** Naming a tool there pre-approves it, and the SDK then skips
+`can_use_tool` entirely — the allowlist stays in the source, looking present,
+while never running. The only symptom is a `CanUseToolShadowedWarning` on
+stderr. `tools=[…]` bounds the surface; `allowed_tools=[]` keeps the gate live.
+A regression test asserts both.
+
+Even so: run it as a normal user, keep `TELEGRAM_ALLOWED_USERS` set, and do not
+expose the host.
+
+### Configuration
+
+| Variable | Default | |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | — | required |
+| `TELEGRAM_ALLOWED_USERS` | *(empty — open to all)* | comma-separated user ids |
+| `DND_MODULE` | `stormwreck-isle` | which pack under `modules/` to run |
+| `DND_MODEL` | `claude-opus-5` | `claude-sonnet-5` is faster and cheaper |
+| `DND_EFFORT` | `medium` | `low` · `medium` · `high` |
+| `DND_MAX_TURNS` | `40` | agent turns per player message |
+| `DND_CAMPAIGN_ROOT` | `~/.claude/dnd` | data root for packs and campaigns |
+
+### Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| *"Пак модуля не готов"* | pack incomplete — run `module_check.py` |
+| `CLINotFoundError` | the `claude` CLI is not on `PATH` for this process |
+| `Another bot instance is already running` | the lock did its job; `kill` the pid it names |
+| `Conflict: terminated by other getUpdates` in an older log | two pollers on one token — the surviving process is deaf, restart it |
+| Turns are slow | Opus writing long prose and reading chapter files; try `DND_MODEL=claude-sonnet-5` and/or `DND_EFFORT=low` |
+| The DM forgot something | it is in the files, not the conversation — ask it to re-read `state.md`, or `/save` more often |
+
+---
+
 ## Scripts Reference
 
 All scripts live in `${CLAUDE_SKILL_DIR}/scripts/`.
@@ -769,6 +1182,36 @@ ${CLAUDE_SKILL_DIR}/
     ├── npcs.md
     └── session-log.md
 
+<plugin root>/skills/module-prep/          # the PDF → module-pack pipeline
+├── SKILL.md                  # the five-step procedure
+├── SKILL-scripts.md          # script flags and tuning constants
+└── scripts/
+    ├── _shared.py            # writing-system classification, path resolution;
+    │                         #   reuses the dnd skill's column sorter
+    ├── pdf_probe.py          # survey: headings, figures, furniture, warnings
+    ├── pdf_extract.py        # per-page corpus, de-columned and cleaned
+    ├── pdf_assets.py         # maps, art, rendered plates + manifest
+    ├── module_build.py       # slice chapters by page range, measure coverage
+    └── module_check.py       # validate a pack before anyone plays it
+
+<repo>/telegram-bot/                       # Telegram front end
+├── bot.py                    # handlers, party-setup flow, single-instance lock
+├── dm_engine.py              # Claude Agent SDK session + tool allowlist
+├── prompts.py                # the DM system prompt (edit this to change the DM)
+├── campaign.py               # per-chat campaign directories and sheets
+├── transcript.py             # append-only verbatim play record
+├── tg_format.py              # map markers, HTML escaping, message chunking
+├── config.py                 # settings; token resolution is lazy
+├── requirements.txt
+├── .env.example
+└── README.md
+
+~/.claude/dnd/modules/<id>/                # a prepared module pack (see above)
+├── world.md · npcs.md · arc.md            #   read at session start
+├── npcs-full.md · bestiary.md · items.md  #   read on demand
+├── maps/ · pregens/ · source/             #   images + legends, sheets, chapters
+└── build-manifest.json                    #   source hash, plan, page coverage
+
 ~/.claude/dnd/campaigns/<name>/
 ├── state.md                  # Current location, party status, active quests, arc tracking
 ├── world.md                  # World lore, setting details, adventure nodes
@@ -776,10 +1219,15 @@ ${CLAUDE_SKILL_DIR}/
 ├── session-log.md            # Session history and recaps (last 2 sessions; older archived)
 ├── session-log-archive.md    # Full session history archive
 ├── session_tail.json         # Last session's display tail — replayed on load
+├── raw-log.md                # Verbatim transcript, append-only (Telegram bot)
 └── characters/
     ├── Aldric.md
     └── Mira.md
 ```
+
+Telegram-run campaigns live beside these as `campaigns/tg-<chat_id>/`. They hold
+only mutable state — the pack they run is read in place, so it is never copied
+per chat.
 
 ---
 
