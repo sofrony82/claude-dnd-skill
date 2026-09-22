@@ -10,15 +10,15 @@ agent that can run shell commands, so tool use is gated by an explicit
 allowlist (`_can_use_tool`) rather than run in a bypass mode:
   * file reads  — only inside the campaign directory and the module pack
   * file writes — only inside the campaign directory
-  * shell       — only the D&D helper scripts, matched by absolute path
+  * shell       — only the D&D helper scripts, matched by absolute path, and
+                  only about this chat's own campaign
+The rules themselves live in `sandbox.py`, shared with the DeepSeek backend.
 Anything else is denied with a reason the agent can read and work around.
 """
 
 import asyncio
 import logging
 import pathlib
-import re
-import shlex
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -33,22 +33,9 @@ from claude_agent_sdk import (
 )
 
 from config import DATA_ROOT, DND_SKILL_DIR, EFFORT, MAX_TURNS, MODEL, MODULE_DIR
+from sandbox import ALLOWED_SCRIPTS, _under, bash_allowed, check_command  # noqa: F401
 
 log = logging.getLogger("dm")
-
-# Helper scripts the DM may run. Anything outside this set is refused.
-ALLOWED_SCRIPTS = {
-    "dice.py", "xp.py", "combat.py", "tracker.py", "lookup.py",
-    "ability-scores.py", "character.py", "calendar.py", "oracle.py",
-}
-
-
-def _under(path: str, root: pathlib.Path) -> bool:
-    try:
-        pathlib.Path(path).expanduser().resolve().relative_to(root.resolve())
-        return True
-    except (ValueError, OSError):
-        return False
 
 
 class DMSession:
@@ -85,35 +72,17 @@ class DMSession:
                          f"({self.campaign_dir}). Файлы модуля менять нельзя."))
 
         if tool == "Bash":
-            cmd = params.get("command", "")
-            if self._bash_allowed(cmd):
+            why = check_command(params.get("command", ""), self.campaign_dir)
+            if why is None:
                 return PermissionResultAllow()
             return PermissionResultDeny(
-                message=("Из Bash доступны только вспомогательные скрипты D&D "
-                         f"({', '.join(sorted(ALLOWED_SCRIPTS))}). "
+                message=(f"Из Bash {why} "
                          "Для всего остального пользуйся Read/Write."))
 
         return PermissionResultDeny(message=f"Инструмент {tool} недоступен в этой игре.")
 
-    @staticmethod
-    def _bash_allowed(cmd: str) -> bool:
-        """True only for a single `python3 <skill>/scripts/<allowed>.py …` call.
-
-        Shell metacharacters are refused outright: chaining is how an allowlist
-        keyed on the first token gets walked around.
-        """
-        if not cmd or re.search(r"[;&|<>`$\n]|\|\|", cmd):
-            return False
-        try:
-            parts = shlex.split(cmd)
-        except ValueError:
-            return False
-        if len(parts) < 2 or not parts[0].startswith("python"):
-            return False
-        script = pathlib.Path(parts[1])
-        if script.name not in ALLOWED_SCRIPTS:
-            return False
-        return _under(str(script), DND_SKILL_DIR)
+    # The shape-only half of the rule, kept as a method for the tests.
+    _bash_allowed = staticmethod(bash_allowed)
 
     # ── lifecycle ────────────────────────────────────────────────────────
     def build_options(self) -> ClaudeAgentOptions:

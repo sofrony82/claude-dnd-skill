@@ -635,6 +635,77 @@ class SandboxTests(unittest.TestCase):
             self.assertNotIn(forbidden, names)
 
 
+class CampaignPinTests(unittest.TestCase):
+    """A helper script may only ever be pointed at the caller's own campaign.
+
+    The scripts take `--campaign NAME` and resolve it under the data root, so
+    before this rule a player could talk the DM into `tracker.py -c <someone
+    else's campaign> clear --all`. The data root is swapped for a temp one here
+    so the scripts really run and the test can look at what they touched.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        _import("config")
+        cls.sb = _import("sandbox")
+        cls.scripts = REPO / "skills" / "dnd" / "scripts"
+
+    def setUp(self):
+        import tempfile
+        self.root = pathlib.Path(tempfile.mkdtemp())
+        self.mine = self.root / "campaigns" / "mine"
+        self.theirs = self.root / "campaigns" / "theirs"
+        for d in (self.mine, self.theirs):
+            d.mkdir(parents=True)
+        self._saved = (self.sb.DATA_ROOT, self.sb.CAMPAIGNS_DIR)
+        self.sb.DATA_ROOT, self.sb.CAMPAIGNS_DIR = self.root, self.root / "campaigns"
+        self.box = self.sb.Sandbox(self.mine)
+
+    def tearDown(self):
+        self.sb.DATA_ROOT, self.sb.CAMPAIGNS_DIR = self._saved
+
+    def why(self, args):
+        return self.sb.check_command(
+            f"python3 {self.scripts}/tracker.py {args}", self.mine)
+
+    def test_own_campaign_allowed(self):
+        for args in ("-c mine status", "--campaign mine status",
+                     "--campaign=mine status", "-cmine status", "-c=mine status"):
+            with self.subTest(args=args):
+                self.assertIsNone(self.why(args))
+
+    def test_scripts_without_a_campaign_unaffected(self):
+        self.assertIsNone(self.sb.check_command(
+            f"python3 {self.scripts}/dice.py d20+5", self.mine))
+
+    def test_other_campaign_refused_however_spelled(self):
+        for args in ("-c theirs status", "--campaign theirs status",
+                     "--campaign=theirs status", "-ctheirs status",
+                     "-c=theirs status", "--camp theirs status",
+                     "--c theirs status", "-c mine -c theirs status",
+                     "-c ../campaigns/theirs status", "-c .. status",
+                     "-c ../../.. status", "-c '' status", "status -c"):
+            with self.subTest(args=args):
+                self.assertIsNotNone(self.why(args))
+
+    def test_refusal_names_the_right_campaign(self):
+        self.assertIn("--campaign mine", self.why("-c theirs status"))
+
+    def test_other_campaign_untouched_end_to_end(self):
+        (self.theirs / "tracker.json").write_text('{"x": 1}', encoding="utf-8")
+        out = self.box.run("run_script", {
+            "command": f"python3 {self.scripts}/tracker.py -c theirs clear --all"})
+        self.assertIn("ОТКАЗАНО", out)
+        self.assertEqual((self.theirs / "tracker.json").read_text(encoding="utf-8"),
+                         '{"x": 1}')
+
+    def test_own_campaign_runs_end_to_end(self):
+        out = self.box.run("run_script", {
+            "command": f"python3 {self.scripts}/calendar.py -c mine init --date '1 Month 1'"})
+        self.assertNotIn("ОТКАЗАНО", out)
+        self.assertTrue((self.mine / "calendar.json").is_file(), out)
+
+
 class NarrationHygieneTests(unittest.TestCase):
     """Text on its way to a player, from the DeepSeek loop.
 

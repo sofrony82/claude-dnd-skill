@@ -10,7 +10,9 @@ So the rules live here, in one place, and they are the same rules the SDK path
 enforces:
   * read   — only inside the campaign directory, the module pack, or the skill
   * write  — only inside the campaign directory
-  * shell  — only the D&D helper scripts, matched by absolute path
+  * shell  — only the D&D helper scripts, matched by absolute path, and only
+             ever about this campaign: a `--campaign` naming any other one
+             is refused
 
 Every path argument is resolved before it is compared, so `..` and symlinks
 cannot walk out of an allowed root. Refusals come back as ordinary tool output
@@ -30,10 +32,10 @@ import re
 import shlex
 import subprocess
 
-from config import DND_SKILL_DIR, MODULE_DIR
+from config import CAMPAIGNS_DIR, DATA_ROOT, DND_SKILL_DIR, MODULE_DIR
 
 # Helper scripts the DM may run. Anything outside this set is refused.
-# Kept byte-identical to dm_engine.ALLOWED_SCRIPTS — two backends, one rule.
+# dm_engine imports this set and `check_command` — two backends, one rule.
 ALLOWED_SCRIPTS = {
     "dice.py", "xp.py", "combat.py", "tracker.py", "lookup.py",
     "ability-scores.py", "character.py", "calendar.py", "oracle.py",
@@ -76,6 +78,49 @@ def bash_allowed(cmd: str) -> bool:
     if script.name not in ALLOWED_SCRIPTS:
         return False
     return _under(str(script), DND_SKILL_DIR)
+
+
+def campaign_values(argv: list) -> list:
+    """Every value a helper script would read as its campaign name.
+
+    tracker, xp, calendar, oracle and lookup take `--campaign NAME` and resolve
+    it under the data root — so the name, not the sandbox, decides whose files
+    the script touches. argparse is generous about spelling: `-c NAME`,
+    `-cNAME`, `-c=NAME`, `--campaign=NAME` and any unambiguous prefix such as
+    `--camp NAME` all land in the same place, so all of them are collected.
+    A flag with nothing after it yields None, which never matches a campaign.
+    """
+    values = []
+    for i, tok in enumerate(argv):
+        flag, eq, val = tok.partition("=")
+        if flag.startswith("--") and len(flag) >= 3 and "--campaign".startswith(flag):
+            values.append(val if eq else (argv[i + 1] if i + 1 < len(argv) else None))
+        elif tok.startswith("-c") and not tok.startswith("--"):
+            rest = tok[2:]
+            if rest:
+                values.append(rest[1:] if rest.startswith("=") else rest)
+            else:
+                values.append(argv[i + 1] if i + 1 < len(argv) else None)
+    return values
+
+
+def check_command(cmd: str, campaign_dir: pathlib.Path) -> str | None:
+    """Why `cmd` may not run for this campaign, or None if it may.
+
+    The shape rules are `bash_allowed`'s. On top of them, every campaign the
+    command names must resolve to `campaign_dir` itself — another player's
+    campaign, the data root, or a `../` walk out of it are all refused.
+    """
+    scripts = ", ".join(sorted(ALLOWED_SCRIPTS))
+    if not bash_allowed(cmd):
+        return ("доступны только вспомогательные скрипты D&D "
+                f"({scripts}), одной командой без ';', '|', '&' и подстановок.")
+    own = pathlib.Path(campaign_dir).resolve()
+    for name in campaign_values(shlex.split(cmd)[2:]):
+        if not name or (CAMPAIGNS_DIR / name).resolve() != own:
+            return (f"скрипты работают только с этой кампанией: "
+                    f"--campaign {own.name}")
+    return None
 
 
 # ── the tool schemas the model sees ──────────────────────────────────────
@@ -201,7 +246,9 @@ def tool_schemas(campaign_dir: pathlib.Path) -> list:
                 "description": (
                     "Запустить вспомогательный скрипт D&D: "
                     + ", ".join(sorted(ALLOWED_SCRIPTS))
-                    + ". Для костей используй roll_dice."
+                    + ". Для костей используй roll_dice. Скриптам, которым нужна "
+                    f"кампания, передавай --campaign {campaign_dir.name} — "
+                    "другие кампании недоступны."
                 ),
                 "parameters": {
                     "type": "object",
@@ -408,11 +455,10 @@ class Sandbox:
 
     def _t_run_script(self, a: dict) -> str:
         cmd = str(a.get("command", ""))
-        if not bash_allowed(cmd):
+        why = check_command(cmd, self.campaign_dir)
+        if why:
             self.denials += 1
-            return ("ОТКАЗАНО: доступны только вспомогательные скрипты D&D "
-                    f"({', '.join(sorted(ALLOWED_SCRIPTS))}), "
-                    "одной командой без ';', '|', '&' и подстановок. "
+            return (f"ОТКАЗАНО: {why} "
                     "Для чтения и записи используй read_file/write_file.")
         return self._exec(shlex.split(cmd))
 
@@ -422,7 +468,7 @@ class Sandbox:
         try:
             r = subprocess.run(
                 argv, capture_output=True, text=True, timeout=SCRIPT_TIMEOUT,
-                cwd=str(self.campaign_dir), shell=False,
+                cwd=str(self.campaign_dir), shell=False, env=_script_env(),
             )
         except subprocess.TimeoutExpired:
             return f"ОШИБКА: скрипт не ответил за {SCRIPT_TIMEOUT} с."
@@ -433,6 +479,19 @@ class Sandbox:
         if r.returncode != 0:
             return f"Скрипт вернул код {r.returncode}.\n{out}\n{err}".strip()
         return (out or "[скрипт ничего не вывел]")[:8000]
+
+
+def _script_env() -> dict:
+    """The environment the helper scripts run in.
+
+    DND_CAMPAIGN_ROOT is pinned to the root `check_command` resolved campaign
+    names against: if the scripts looked somewhere else, the check would be
+    about a different directory than the one they write.
+    """
+    import os
+    return {**os.environ,
+            "DND_CAMPAIGN_ROOT": str(DATA_ROOT),
+            "DND_DICE_PHYSICAL": "0"}
 
 
 def _python() -> str:

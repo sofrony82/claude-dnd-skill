@@ -209,7 +209,10 @@ path has:
 - **Write / Edit** — only inside the campaign directory. The pack is read-only.
 - **Bash** — only `python3 <skill>/scripts/<allowed>.py …`, matched by resolved
   absolute path, with shell metacharacters (`;`, `|`, `&`, backticks, `$`)
-  refused outright so the allowlist cannot be walked around by chaining.
+  refused outright so the allowlist cannot be walked around by chaining. A
+  `--campaign` argument (in any spelling argparse accepts: `-cX`, `--camp X`, …)
+  must resolve to the chat's own campaign directory; tracker/xp/calendar/oracle
+  would otherwise read and write whichever campaign the name points at.
 - Everything else is denied with a reason the agent can read and route around.
 
 Every path argument is resolved before it is compared, so `..` and symlinks are

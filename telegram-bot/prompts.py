@@ -191,6 +191,7 @@ def _table_rules(party_block: str, module_dir: pathlib.Path,
 
 СОСТОЯНИЕ ИГРЫ
 Кампания: {campaign_dir}
+Скриптам с --campaign передавай ровно `--campaign {campaign_dir.name}`.
 
   state.md          — текущая сцена, хиты, квесты, состояние мира.
   characters/*.md   — листы персонажей. Хиты, ячейки заклинаний, инвентарь.
