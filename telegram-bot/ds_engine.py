@@ -127,6 +127,23 @@ def _glue(head: str, tail: str) -> str:
     return f"{head} {tail}"
 
 
+def _describe_call(name: str, args: dict, result) -> str:
+    """One journal line per tool call: what was asked, what came back.
+
+    Dice get their notation, label and full result — that is what lets an
+    operator check a roll the DM narrated against the one it actually made.
+    Everything else gets its target and the first line of the result.
+    """
+    if name == "roll_dice":
+        what = f"{args.get('notation', '')} «{args.get('label', '')}»"
+    else:
+        what = str(args.get("path") or args.get("pattern") or args.get("command") or "")
+    first = (str(result).strip().splitlines() or [""])[0]
+    if len(first) > 160:
+        first = first[:160] + "…"
+    return f"{name} {what} -> {first}"
+
+
 class DSSession:
     """A DeepSeek DM agent bound to one chat."""
 
@@ -310,6 +327,8 @@ class DSSession:
                             pass
                     result = await asyncio.to_thread(self.sandbox.run, name, args)
 
+                log.info("chat %s: tool %s", self.chat_id,
+                         _describe_call(name, args, result))
                 self.history.append({
                     "role": "tool",
                     "tool_call_id": call.get("id") or f"call_{len(self.history)}",

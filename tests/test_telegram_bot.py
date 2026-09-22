@@ -506,6 +506,16 @@ class DSLoopTests(unittest.TestCase):
         roles = [m["role"] for m in self.s.history]
         self.assertIn("tool", roles)
 
+    def test_rolls_are_logged_with_label_and_result(self):
+        """A narrated roll has to be checkable against the one actually made."""
+        self.script(_msg("", calls=[("roll_dice", '{"notation": "d20", '
+                                     '"label": "Спасбросок от смерти"}')]),
+                    _msg("Ты держишься."))
+        with self.assertLogs("dm.ds", level="INFO") as logs:
+            self.ask()
+        line = next(l for l in logs.output if "tool roll_dice" in l)
+        self.assertIn("d20 «Спасбросок от смерти» -> Roll:", line)
+
     def test_reply_cut_by_the_limit_is_continued(self):
         seen = self.script(_msg("Она нависает над тобой. Кость", finish="length"),
                            _msg("опускается на доски рядом с головой."))

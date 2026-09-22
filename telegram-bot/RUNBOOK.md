@@ -222,6 +222,14 @@ wrong, this is what tells the causes apart:
 journalctl --user -u dnd-bot --since -30min | grep "chat <id>: completion"
 ```
 
+Each tool call gets a line too — `tool roll_dice d20 «Спасбросок от смерти» ->
+Roll: 11 = 11`, `tool write_file state.md -> Записано…`. To check the dice the
+DM narrated against the ones it actually rolled:
+
+```bash
+journalctl --user -u dnd-bot --since -30min | grep "tool roll_dice"
+```
+
 ---
 
 ## Troubleshooting
