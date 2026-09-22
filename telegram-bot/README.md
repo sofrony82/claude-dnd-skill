@@ -193,6 +193,14 @@ more than two while the DM is still answering gets a "wait" note instead of a
 queue of paid turns. A DM session nobody has used for `DND_IDLE_CLOSE_MINUTES`
 is closed; the next message reopens it from the files and the log.
 
+The whole bot has a daily budget of Chat Completions requests
+(`DND_DAILY_COMPLETIONS`, 50 000; a turn makes about 7, at most
+`DND_DS_MAX_STEPS`). A turn starts only if a whole turn's worth still fits,
+and every request is checked against the limit on its own; past it, players are
+told the DM is done for the day. The count survives restarts in
+`~/.claude/dnd/usage.json`; admins see it, by player and by day, with `/usage`.
+It applies to the DeepSeek backend.
+
 ## Configuration
 
 | Variable | Default | |
@@ -213,6 +221,8 @@ is closed; the next message reopens it from the files and the log.
 | `DND_HISTORY_TURNS` | `12` | player turns kept verbatim before trimming |
 | `DND_SAVE_REMIND_TURNS` | `4` | player turns without a `state.md` write before the DM is told to save |
 | `DND_IDLE_CLOSE_MINUTES` | `30` | close a DM session unused this long; `0` keeps them forever |
+| `DND_DAILY_COMPLETIONS` | `50000` | Chat Completions requests per day, all players together; `0` = no limit |
+| `DND_USAGE_TZ` | `Europe/Moscow` | the time zone whose midnight starts a new day for that limit |
 
 ## Security
 

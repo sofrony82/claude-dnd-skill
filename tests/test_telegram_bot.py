@@ -842,6 +842,16 @@ class DSLoopTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.s = self.ds.DSSession(1, pathlib.Path(self._tmp.name), "system")
         self.s.client = object()          # never used: _complete is scripted
+        # Completions are counted against the daily budget; count them here,
+        # not in the live ~/.claude/dnd/usage.json.
+        u = self.ds.usage
+        saved = (u.USAGE_FILE, u.LOCK_FILE, u.DAILY_COMPLETIONS)
+        u.USAGE_FILE = pathlib.Path(self._tmp.name) / "usage.json"
+        u.LOCK_FILE = pathlib.Path(self._tmp.name) / "usage.lock"
+
+        def restore():
+            u.USAGE_FILE, u.LOCK_FILE, u.DAILY_COMPLETIONS = saved
+        self.addCleanup(restore)
 
     def script(self, *replies):
         queue = list(replies)
@@ -937,6 +947,20 @@ class DSLoopTests(unittest.TestCase):
             self.assertNotIn("max_tokens", captured)
         self.assertTrue(any("finish=stop" in line and "reasoning=1" in line
                             for line in logs.output))
+        self.assertEqual(self.ds.usage.used_today(), 1)
+
+    def test_no_request_once_the_day_is_spent(self):
+        import asyncio
+
+        async def create(**kw):
+            raise AssertionError("request made past the daily limit")
+
+        from types import SimpleNamespace as NS
+        self.s.client = NS(chat=NS(completions=NS(create=create)))
+        self.ds.usage.DAILY_COMPLETIONS = 1
+        self.ds.usage.record(1)
+        with self.assertRaises(self.ds.usage.LimitReached):
+            asyncio.run(self.s._complete())
 
 
 if __name__ == "__main__":
@@ -1139,3 +1163,67 @@ class AccessTests(unittest.TestCase):
         self.a.ACCESS_FILE.write_text("{not json", encoding="utf-8")
         self.assertFalse(self.a.is_allowed(self.STRANGER))
         self.assertTrue(self.a.is_allowed(self.ADMIN))
+
+
+class DailyBudgetTests(unittest.TestCase):
+    """The bot-wide daily budget of Chat Completions requests."""
+
+    @classmethod
+    def setUpClass(cls):
+        _import("config")
+        cls.u = _import("usage")
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self._tmp.name)
+        self._saved = (self.u.USAGE_FILE, self.u.LOCK_FILE, self.u.DAILY_COMPLETIONS,
+                       self.u.TURN_RESERVE)
+        self.u.USAGE_FILE, self.u.LOCK_FILE = root / "usage.json", root / "usage.lock"
+        self.u.DAILY_COMPLETIONS, self.u.TURN_RESERVE = 10, 4
+
+    def tearDown(self):
+        (self.u.USAGE_FILE, self.u.LOCK_FILE, self.u.DAILY_COMPLETIONS,
+         self.u.TURN_RESERVE) = self._saved
+        self._tmp.cleanup()
+
+    def spend(self, n, user=1):
+        for _ in range(n):
+            self.u.record(user, 100, 10)
+
+    def test_counts_persist_per_day_and_user(self):
+        self.spend(3, user=1)
+        self.spend(2, user=2)
+        self.assertEqual(self.u.used_today(), 5)
+        (day, d), = self.u.days()
+        self.assertEqual(day, self.u.today())
+        self.assertEqual(d["users"], {"1": 3, "2": 2})
+        self.assertEqual(d["prompt_tokens"], 500)
+
+    def test_a_turn_starts_only_if_a_whole_one_fits(self):
+        self.spend(6)
+        self.assertTrue(self.u.can_start_turn())      # 4 left = reserve
+        self.spend(1)
+        self.assertFalse(self.u.can_start_turn())
+        self.u.check()                                # but a running turn goes on
+
+    def test_hard_stop_at_the_limit(self):
+        self.spend(10)
+        with self.assertRaises(self.u.LimitReached):
+            self.u.check()
+
+    def test_zero_means_no_limit(self):
+        self.u.DAILY_COMPLETIONS = 0
+        self.spend(20)
+        self.assertTrue(self.u.can_start_turn())
+        self.assertIsNone(self.u.remaining())
+        self.u.check()
+
+    def test_yesterday_does_not_count(self):
+        import json
+        self.u.USAGE_FILE.write_text(json.dumps(
+            {"days": {"2000-01-01": {"completions": 999, "prompt_tokens": 0,
+                                     "completion_tokens": 0, "users": {}}}}),
+            encoding="utf-8")
+        self.assertEqual(self.u.used_today(), 0)
+        self.assertTrue(self.u.can_start_turn())

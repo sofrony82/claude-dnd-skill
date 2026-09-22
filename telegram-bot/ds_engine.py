@@ -47,6 +47,7 @@ from config import (
     HISTORY_TURNS,
     SAVE_REMIND_TURNS,
 )
+import usage
 from sandbox import Sandbox, tool_schemas
 
 log = logging.getLogger("dm.ds")
@@ -344,6 +345,9 @@ class DSSession:
 
     async def _complete(self) -> dict:
         """One chat completion, normalised to a plain dict."""
+        # The daily budget is checked before every request, not only per turn:
+        # turns in several chats at once can spend the per-turn reserve together.
+        usage.check()
         kwargs = {}
         if DS_MAX_TOKENS > 0:
             kwargs["max_tokens"] = DS_MAX_TOKENS
@@ -355,22 +359,25 @@ class DSSession:
             temperature=DS_TEMPERATURE,
             **kwargs,
         )
-        usage = getattr(resp, "usage", None)
-        if usage is not None:
-            self.total_tokens += getattr(usage, "total_tokens", 0) or 0
+        tokens = getattr(resp, "usage", None)
+        if tokens is not None:
+            self.total_tokens += getattr(tokens, "total_tokens", 0) or 0
+        # The chat id is the player's id: private chats only.
+        usage.record(self.chat_id, getattr(tokens, "prompt_tokens", 0),
+                     getattr(tokens, "completion_tokens", 0))
 
         choice = resp.choices[0]
         m = choice.message
         # One line per completion. When a turn goes wrong, this is what tells
         # "cut by the limit" from "chose to say nothing" from "spent it all
         # reasoning" — the three look identical from the chat.
-        details = getattr(usage, "completion_tokens_details", None)
+        details = getattr(tokens, "completion_tokens_details", None)
         log.info("chat %s: completion finish=%s tools=%d content=%d chars "
                  "tokens prompt=%s completion=%s reasoning=%s",
                  self.chat_id, choice.finish_reason, len(m.tool_calls or []),
                  len(m.content or ""),
-                 getattr(usage, "prompt_tokens", None),
-                 getattr(usage, "completion_tokens", None),
+                 getattr(tokens, "prompt_tokens", None),
+                 getattr(tokens, "completion_tokens", None),
                  getattr(details, "reasoning_tokens", None))
         if choice.finish_reason not in ("stop", "tool_calls", None):
             log.warning("chat %s: completion ended with finish_reason=%s",

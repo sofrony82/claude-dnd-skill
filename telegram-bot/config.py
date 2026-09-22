@@ -127,6 +127,11 @@ DS_MAX_TOKENS = int(os.environ.get("DND_DS_MAX_TOKENS", "0"))
 # source, then a few rolls.
 DS_MAX_STEPS = int(os.environ.get("DND_DS_MAX_STEPS", "24"))
 
+# Chat Completions requests the whole bot may make per day, all players
+# together (see usage.py); 0 = no limit. The day ends at midnight in USAGE_TZ.
+DAILY_COMPLETIONS = int(os.environ.get("DND_DAILY_COMPLETIONS", "50000"))
+USAGE_TZ = os.environ.get("DND_USAGE_TZ", "Europe/Moscow")
+
 # Player turns kept verbatim before the window is trimmed on a turn boundary.
 HISTORY_TURNS = int(os.environ.get("DND_HISTORY_TURNS", "12"))
 

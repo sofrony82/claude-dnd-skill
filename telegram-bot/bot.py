@@ -55,6 +55,7 @@ import chat_lanes
 import prompts
 import tg_format
 import transcript
+import usage
 from config import (
     BACKEND,
     IDLE_CLOSE_MINUTES,
@@ -104,7 +105,12 @@ MENU = [
     ("help", "Все команды"),
 ]
 # Admins also get this one in their menu.
-ADMIN_MENU = MENU + [("requests", "Запросы доступа и игроки")]
+ADMIN_MENU = MENU + [("requests", "Запросы доступа и игроки"),
+                     ("usage", "Расход запросов к модели")]
+
+LIMIT_TEXT = ("🌙 Мастер на сегодня выдохся: у бота кончился дневной запас "
+              "запросов к модели. Продолжим завтра — счёт обнуляется в полночь "
+              "по Москве.")
 
 
 def log_player(update: Update) -> None:
@@ -299,6 +305,9 @@ async def typing(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
 
 async def run_turn(update: Update, context: ContextTypes.DEFAULT_TYPE, player_text: str):
     chat_id = update.effective_chat.id
+    if not usage.can_start_turn():
+        await update.effective_message.reply_text(LIMIT_TEXT)
+        return
     session = REGISTRY.get(chat_id)
     if session is None:
         party = campaign.load_party(chat_id)
@@ -317,6 +326,10 @@ async def run_turn(update: Update, context: ContextTypes.DEFAULT_TYPE, player_te
     async with typing(context, chat_id):
         try:
             reply = await session.ask(player_text)
+        except usage.LimitReached:
+            log.warning("chat %s: daily request budget ran out mid-turn", chat_id)
+            await update.effective_message.reply_text(LIMIT_TEXT)
+            return
         except Exception:
             # The details are for the log. A player has no use for an exception
             # name, and its message can carry paths, URLs or a provider's error.
@@ -462,6 +475,40 @@ async def cmd_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode=constants.ParseMode.HTML,
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
                         "✅ Всё-таки пустить", callback_data=f"acc:ok:{uid}")]]))
+
+
+def _n(x: int) -> str:
+    """12345 -> "12 345"."""
+    return f"{x:,}".replace(",", " ")
+
+
+async def cmd_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin view of the daily request budget: today by player, the last week."""
+    if not await admitted(update, context):
+        return
+    if not access.is_admin(update.effective_user.id):
+        await update.effective_message.reply_text(HELP, parse_mode=constants.ParseMode.HTML)
+        return
+    limit = usage.DAILY_COMPLETIONS
+    used = usage.used_today()
+    lines = [f"<b>Запросы к модели сегодня</b> ({usage.today()}): {_n(used)}"
+             + (f" из {_n(limit)} ({used * 100 // limit}%)" if limit > 0 else " — без лимита")]
+    recs = {}
+    for section in access.listing().values():
+        recs.update(dict(section))
+    days = usage.days(7)
+    if days and days[0][0] == usage.today():
+        top = sorted(days[0][1]["users"].items(), key=lambda kv: kv[1], reverse=True)
+        for uid, n in top[:15]:
+            who = access.label(int(uid), recs.get(int(uid), {"name": ""}))
+            lines.append(f"  {_n(n)} — {html.escape(who)}")
+        d = days[0][1]
+        lines.append(f"Токены: вход {_n(d['prompt_tokens'])}, выход {_n(d['completion_tokens'])}")
+    if len(days) > 1:
+        lines.append("\n<b>По дням</b>")
+        lines += [f"  {day}: {_n(d['completions'])}" for day, d in days]
+    await update.effective_message.reply_text(
+        "\n".join(lines), parse_mode=constants.ParseMode.HTML)
 
 
 # ── onboarding ───────────────────────────────────────────────────────────
@@ -974,6 +1021,7 @@ def main():
     app.add_handler(CommandHandler("save", cmd_save))
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("requests", cmd_requests))
+    app.add_handler(CommandHandler("usage", cmd_usage))
     app.add_handler(CallbackQueryHandler(on_access, pattern=r"^acc:"))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(ChatMemberHandler(on_membership, ChatMemberHandler.MY_CHAT_MEMBER))

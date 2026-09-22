@@ -318,6 +318,12 @@ that believes it read a whole file will narrate confidently from the half it got
 - History past `DND_HISTORY_TURNS` player turns keeps its structure but has large
   tool results stubbed out.
 
+The daily request budget (`DND_DAILY_COMPLETIONS`) is counted in
+`~/.claude/dnd/usage.json`, one entry per day with a per-player breakdown; the
+journal warns at 80% and 100% (`grep "request budget"`), and `/usage` shows it
+in the chat. To lift the stop for the rest of a day, raise the variable and
+restart, or edit that day's `completions` in the file.
+
 Trimming cuts on turn boundaries by necessity: a `tool` message is only valid
 directly after the `assistant` message whose `tool_calls` it answers, so slicing
 the list anywhere else produces a request the API rejects outright.

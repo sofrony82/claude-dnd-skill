@@ -45,6 +45,7 @@ import engine
 import prompts
 import tg_format
 import transcript
+import usage
 from config import BACKEND, MODULE_DIR, PREGENS
 
 logging.basicConfig(
@@ -165,9 +166,13 @@ async def turn(req: Turn):
     async def on_progress(name: str):
         used.append(name)
 
+    if not usage.can_start_turn():
+        raise HTTPException(429, "daily request budget spent")
     t0 = time.monotonic()
     try:
         raw = await session.ask(req.text, on_progress=on_progress)
+    except usage.LimitReached as e:
+        raise HTTPException(429, "daily request budget spent") from e
     except Exception as e:                          # noqa: BLE001
         log.exception("chat %s: turn failed", req.chat_id)
         raise HTTPException(502, f"{type(e).__name__}: {e}") from e
