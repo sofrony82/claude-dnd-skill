@@ -32,6 +32,7 @@ import asyncio
 import json
 import logging
 import pathlib
+import re
 
 from openai import AsyncOpenAI
 
@@ -52,6 +53,46 @@ log = logging.getLogger("dm.ds")
 # when the window is trimmed: the DM needs to remember that it read world.md,
 # not to carry all 21k tokens of it for the rest of the session.
 STUB_OVER = 2_000
+
+# Times a turn that produced no narration is nudged before giving up. A DM that
+# silently returns nothing costs the player their action — in a 33-turn replay
+# this happened on 7 turns, all of them heavy combat rounds.
+NUDGE_LIMIT = 2
+
+NUDGE = ("Ты не сказал игроку ничего. Опиши результат словами, обычной прозой "
+         "по-русски: что произошло, что видит и слышит персонаж, чем кончился "
+         "раунд. Не вызывай инструменты — все нужные броски уже сделаны, их "
+         "результаты выше. Просто расскажи игроку, что случилось.")
+
+# The model occasionally writes its own tool-call syntax into `content` instead
+# of returning a structured tool call — `<｜DSML｜ invoke name="roll_dice">…`.
+# That is not narration and must never reach a player, so it is stripped and the
+# turn is treated as having produced nothing.
+_PAIRED_MARKUP = re.compile(
+    r"<\s*(tool_call|function_call|invoke|antml:\w+)[^>]*>.*?<\s*/\s*\1\s*>",
+    re.I | re.S)
+_DSML_START = re.compile(r"<[｜|]\s*DSML\s*[｜|]")
+_LONE_MARKUP = re.compile(
+    r"<\s*/?\s*(?:tool_call|function_call|invoke|parameter|antml:\w+)[^>]*>", re.I)
+
+
+def _strip_tool_markup(text):
+    """(clean_text, leaked?) — remove tool-call syntax the model wrote as prose.
+
+    The tags' *contents* go too, not just the tags: what sits inside is the
+    arguments it meant to pass, and half a serialised argument list reads worse
+    to a player than the tags did.
+    """
+    if not text:
+        return "", False
+    cleaned = _PAIRED_MARKUP.sub("", text)
+    # The DSML block is emitted as a trailing run, so everything from its first
+    # marker onward is argument soup rather than narration.
+    m = _DSML_START.search(cleaned)
+    if m:
+        cleaned = cleaned[:m.start()]
+    cleaned = _LONE_MARKUP.sub("", cleaned)
+    return cleaned.strip(), cleaned.strip() != text.strip()
 
 
 class DSSession:
@@ -181,10 +222,32 @@ class DSSession:
                 log.warning("chat %s: hit the %s-step ceiling in one turn",
                             self.chat_id, DS_MAX_STEPS)
 
+            # A turn with no narration is a lost turn: the player acted and the
+            # world said nothing back. It happens when the model spends the
+            # whole reply reasoning, or writes tool syntax where prose belongs,
+            # and it is far more common in heavy combat than anywhere else. Ask
+            # again rather than hand the player silence.
+            for attempt in range(NUDGE_LIMIT):
+                if any(c.strip() for c in narration):
+                    break
+                log.warning("chat %s: empty narration, nudging (%s/%s)",
+                            self.chat_id, attempt + 1, NUDGE_LIMIT)
+                self.history.append({"role": "user", "content": NUDGE})
+                msg = await self._complete()
+                text = (msg.get("content") or "").strip()
+                self.history.append({"role": "assistant",
+                                     "content": msg.get("content") or ""})
+                if text:
+                    narration.append(text)
+
             self.turns += 1
             spoken = [c for c in narration if c.strip()] or \
                      [c for c in preamble if c.strip()]
-            return "\n".join(spoken).strip()
+            out = "\n".join(spoken).strip()
+            if not out:
+                log.error("chat %s: turn produced no narration after %s nudges",
+                          self.chat_id, NUDGE_LIMIT)
+            return out
 
     async def _complete(self) -> dict:
         """One chat completion, normalised to a plain dict."""
@@ -200,7 +263,8 @@ class DSSession:
         if usage is not None:
             self.total_tokens += getattr(usage, "total_tokens", 0) or 0
 
-        m = resp.choices[0].message
+        choice = resp.choices[0]
+        m = choice.message
         calls = []
         for c in (m.tool_calls or []):
             calls.append({
@@ -209,7 +273,12 @@ class DSSession:
                 "function": {"name": c.function.name,
                              "arguments": c.function.arguments},
             })
-        return {"content": m.content, "tool_calls": calls}
+        content, leaked = _strip_tool_markup(m.content)
+        if leaked:
+            log.warning("chat %s: model wrote tool markup as text instead of "
+                        "calling a tool", self.chat_id)
+        return {"content": content, "tool_calls": calls,
+                "finish_reason": choice.finish_reason, "markup_leak": leaked}
 
 
 class DSRegistry:

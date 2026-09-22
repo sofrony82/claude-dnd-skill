@@ -28,6 +28,10 @@ HTTP ──▶ api_server.py┘                   ds_engine.py  (DeepSeek + sand
                     └─ writes: ~/.claude/dnd/campaigns/tg-<chat_id>/   (state, sheets, log)
 ```
 
+> **Operating it?** [RUNBOOK.md](RUNBOOK.md) covers starting and stopping the
+> services, a symptom-to-fix troubleshooting table, and the layered end-to-end
+> test procedure to run after a change.
+
 ## Prerequisites
 
 - Python 3.11+
@@ -259,14 +263,25 @@ holds it. Running the bot on two hosts means two tokens.
 Delete the directory (or `/reset`) to start over. The module pack is untouched
 by play, so several chats can run the same adventure independently.
 
-## Troubleshooting
+## Testing and troubleshooting
 
-**«Пак модуля не готов»** — the pack is missing files. Run `module_check.py`.
+See [RUNBOOK.md](RUNBOOK.md) — startup failures, misbehaviour at the table,
+latency and cost, and the three-layer test procedure:
 
-**`CLINotFoundError`** — the `claude` CLI is not on `PATH` for this process.
+```bash
+.venv/bin/python e2e_test.py --offline     # ~1s, free, includes the unit suite
+.venv/bin/python e2e_test.py               # ~1min, live model
+```
 
-**Turns are slow** — Opus writing long Russian prose and reading chapter files.
-Set `DND_MODEL=claude-sonnet-5` and/or `DND_EFFORT=low`.
+The quick ones:
+
+**«Пак модуля не готов»** — the pack is missing files; check
+`curl -s localhost:8000/health | jq .module_missing`.
+
+**`CLINotFoundError`** — backend is `claude` but the CLI is not on `PATH`.
+
+**`Another bot instance is already running`** — one `getUpdates` consumer per
+token. Stop the other one, or use a second token.
 
 **The DM forgets something** — it is in the files, not the conversation. Ask it
 to re-read `state.md`, or `/save` more often at scene boundaries.

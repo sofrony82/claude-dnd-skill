@@ -393,5 +393,60 @@ class SandboxTests(unittest.TestCase):
             self.assertNotIn(forbidden, names)
 
 
+class NarrationHygieneTests(unittest.TestCase):
+    """Text on its way to a player, from the DeepSeek loop.
+
+    Both regressions here were found by a 33-turn replay, not by reasoning about
+    the code: 7 of 33 turns came back with no narration at all, and the model
+    was separately observed writing its own tool-call syntax into `content`
+    instead of returning a structured call.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if importlib.util.find_spec("openai") is None:
+            raise unittest.SkipTest("openai not installed in this interpreter")
+        _import("config")
+        cls.ds = _import("ds_engine")
+
+    def strip(self, s):
+        return self.ds._strip_tool_markup(s)
+
+    def test_plain_prose_is_untouched(self):
+        text = "Дрейк бросается на тебя, и когти скрежещут по камню."
+        self.assertEqual(self.strip(text), (text, False))
+
+    def test_legitimate_dice_prose_is_not_mistaken_for_markup(self):
+        text = "🎲 d20+3 → 14+3 = 17 против СЛ 15 — успех. *Рунара* кивает."
+        self.assertEqual(self.strip(text), (text, False))
+
+    def test_dsml_block_is_removed_with_its_arguments(self):
+        raw = ('<｜DSML｜ calls>\n<｜DSML｜ invoke name="roll_dice">\n'
+               '<｜DSML｜ parameter name="dice">d20</｜DSML｜ parameter>')
+        clean, leaked = self.strip(raw)
+        self.assertTrue(leaked)
+        self.assertEqual(clean, "")
+        self.assertNotIn("d20", clean, "argument soup must not reach the player")
+
+    def test_prose_before_a_markup_block_survives(self):
+        clean, leaked = self.strip('Он падает.\n<｜DSML｜ invoke name="roll_dice">')
+        self.assertTrue(leaked)
+        self.assertEqual(clean, "Он падает.")
+
+    def test_paired_tool_call_tags_are_removed_with_contents(self):
+        clean, leaked = self.strip("<tool_call>roll_dice</tool_call>Он падает.")
+        self.assertTrue(leaked)
+        self.assertEqual(clean, "Он падает.")
+
+    def test_empty_input(self):
+        self.assertEqual(self.strip(""), ("", False))
+        self.assertEqual(self.strip(None), ("", False))
+
+    def test_a_lost_turn_gets_retried(self):
+        """An empty turn costs the player their action, so the loop nudges."""
+        self.assertGreaterEqual(self.ds.NUDGE_LIMIT, 1)
+        self.assertIn("Не вызывай инструменты", self.ds.NUDGE)
+
+
 if __name__ == "__main__":
     unittest.main()
