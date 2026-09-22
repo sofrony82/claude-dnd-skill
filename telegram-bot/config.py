@@ -63,6 +63,8 @@ DATA_ROOT = pathlib.Path(
 ).expanduser().resolve()
 MODULES_DIR = DATA_ROOT / "modules"
 CAMPAIGNS_DIR = DATA_ROOT / "campaigns"
+# chat id → the campaign that chat is playing (see campaign.py)
+CHATS_DIR = DATA_ROOT / "chats"
 
 MODULE_ID = os.environ.get("DND_MODULE", "stormwreck-isle")
 MODULE_DIR = MODULES_DIR / MODULE_ID

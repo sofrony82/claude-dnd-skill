@@ -131,7 +131,10 @@ async def create_session(req: NewSession):
 
     await REGISTRY.close(req.chat_id)
     if req.reset or not campaign.exists(req.chat_id):
-        cdir = campaign.create(req.chat_id, party)
+        # A fixed id per chat_id, so a reset replaces the test campaign rather
+        # than minting a new one every run.
+        cdir = campaign.create(req.chat_id, party,
+                               campaign_id=campaign.legacy_id(req.chat_id))
     else:
         cdir = campaign.campaign_dir(req.chat_id)
 

@@ -158,12 +158,15 @@ is written for four; fewer is playable and more dangerous.
 | Command | |
 |---|---|
 | `/start` | begin, or resume an existing campaign |
+| `/games` | your campaigns — switch to one, or move one to the trash |
+| `/new` | start another campaign; the current one is kept |
+| `/rename <title>` | rename the current campaign |
 | `/party` | who is in the party |
 | `/sheet [name]` | character sheet, read from the files |
 | `/map [n]` | show a map — the current one, or map `n` |
 | `/recap` | where you are and what is going on |
 | `/save` | flush state and sheets to disk |
-| `/reset` | wipe the campaign and start over |
+| `/reset` | move the current campaign to the trash and start over |
 
 Everything else you type is your turn. Write freely, for the whole party
 («идём в храм, Дарин осматривает статую») or in character.
@@ -254,15 +257,34 @@ holds it. Running the bot on two hosts means two tokens.
 ## State on disk
 
 ```
-~/.claude/dnd/campaigns/tg-<chat_id>/
-    party.json        who is at the table
+~/.claude/dnd/campaigns/<campaign_id>/
+    party.json        who is at the table, owner, title
     state.md          current scene, quests, world state
     session-log.md    what happened
+    raw-log.md        verbatim transcript
     characters/*.md   one sheet per character
+~/.claude/dnd/campaigns/.trash/<campaign_id>-<stamp>/
+                      campaigns deleted from the bot
+~/.claude/dnd/chats/<chat_id>.json
+                      {"active": "<campaign_id>"} — what the chat is playing
 ```
 
-Delete the directory (or `/reset`) to start over. The module pack is untouched
-by play, so several chats can run the same adventure independently.
+New campaigns are named `<date>-<first character>` (`20260922-merri`). Ones made
+before multi-campaign support are `tg-<chat_id>` with no owner field; they stay
+where they are and belong to the user in the `chat_id` their party.json records
+(a private chat's id is its user's id). So a backup copied back under any
+`tg-…` name shows up in that user's `/games` and can be resumed. The API
+server keeps using `tg-<chat_id>` for its test chats, and those never show in
+anyone's `/games`.
+
+Deleting from the bot never erases: the directory moves to `.trash/`. To
+restore one, move it back and strip the stamp:
+
+    mv ~/.claude/dnd/campaigns/.trash/20260922-merri-20260922-174711 \
+       ~/.claude/dnd/campaigns/20260922-merri
+
+Empty the trash by hand. The module pack is untouched by play, so several
+campaigns can run the same adventure independently.
 
 ## Testing and troubleshooting
 

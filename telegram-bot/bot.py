@@ -6,6 +6,10 @@ Private 1:1 play: one person runs the whole party, which is what the module
 itself suggests for a small table. /start walks through picking and naming
 characters, then hands the table to the DM agent and gets out of the way.
 
+A player may keep several campaigns: /games lists them and switches the chat
+between them, /new starts another without touching the rest, and deleting one
+moves it to the trash rather than erasing it (see campaign.py).
+
 Run:  python3 bot.py      (see README.md)
 """
 
@@ -96,12 +100,15 @@ WELCOME = (
 HELP = (
     "<b>Команды</b>\n"
     "/start — начать или продолжить игру\n"
+    "/games — мои кампании: переключиться или убрать в корзину\n"
+    "/new — новая кампания (текущая сохранится)\n"
+    "/rename — переименовать текущую кампанию\n"
     "/party — состав отряда\n"
     "/sheet — лист персонажа\n"
     "/map — показать карту текущей местности\n"
     "/recap — краткий пересказ: где мы и что происходит\n"
     "/save — записать состояние кампании в файлы\n"
-    "/reset — стереть кампанию и начать заново\n"
+    "/reset — убрать текущую кампанию в корзину\n"
     "/help — эта справка\n\n"
     "Всё остальное просто пиши текстом — это твой ход. "
     "Можно обобщённо («идём в храм, Дарин осматривает статую») "
@@ -254,23 +261,137 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = update.effective_chat.id
-    if campaign.exists(chat_id) and not context.chat_data.get(K_STAGE):
-        party = campaign.load_party(chat_id)
-        names = ", ".join(p["name"] for p in party["party"])
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("▶️ Продолжить", callback_data="go:continue"),
-            InlineKeyboardButton("🗑 Начать заново", callback_data="go:reset"),
-        ]])
-        await update.effective_message.reply_text(
-            f"У тебя уже есть кампания. Отряд: <b>{html.escape(names)}</b>.",
-            parse_mode=constants.ParseMode.HTML, reply_markup=kb)
-        return
+    if not context.chat_data.get(K_STAGE):
+        if campaign.exists(chat_id):
+            party = campaign.load_party(chat_id)
+            names = ", ".join(p["name"] for p in party["party"])
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("▶️ Продолжить", callback_data="go:continue")],
+                [InlineKeyboardButton("➕ Новая кампания", callback_data="go:new"),
+                 InlineKeyboardButton("📚 Мои игры", callback_data="games")],
+            ])
+            await update.effective_message.reply_text(
+                f"Сейчас идёт кампания. Отряд: <b>{html.escape(names)}</b>.",
+                parse_mode=constants.ParseMode.HTML, reply_markup=kb)
+            return
+        # Nothing active, but other campaigns exist: let them pick one up.
+        if campaign.list_for(update.effective_user.id):
+            return await cmd_games(update, context)
 
+    await begin_onboarding(update, context)
+
+
+async def begin_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                           edit: bool = False):
+    """Ask for party size. Leaves every existing campaign where it is."""
     context.chat_data.clear()
     context.chat_data[K_STAGE] = "size"
     context.chat_data[K_PARTY] = []
+    if edit:
+        await update.callback_query.edit_message_text(
+            WELCOME, parse_mode=constants.ParseMode.HTML, reply_markup=size_keyboard())
+    else:
+        await update.effective_message.reply_text(
+            WELCOME, parse_mode=constants.ParseMode.HTML, reply_markup=size_keyboard())
+
+
+# ── several campaigns ────────────────────────────────────────────────────
+def games_view(user_id: int, active):
+    """Text and keyboard for the campaign list."""
+    games = campaign.list_for(user_id)
+    if not games:
+        return ("Кампаний пока нет.",
+                InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "➕ Новая кампания", callback_data="go:new")]]))
+    lines, rows = ["<b>Твои кампании</b>"], []
+    for i, g in enumerate(games, 1):
+        mark = " — <i>сейчас играем</i>" if g["id"] == active else ""
+        party = ", ".join(f"{p['name']} ({p['klass']})" for p in g["party"])
+        when = g["last_played"].strftime("%d.%m %H:%M") if g["last_played"] else "—"
+        where = g["location"]
+        if len(where) > 90:
+            where = where[:89].rstrip() + "…"
+        lines.append(f"\n<b>{i}. {html.escape(g['title'])}</b>{mark}\n"
+                     f"{html.escape(party)} · {when}"
+                     + (f"\n📍 {html.escape(where)}" if where else ""))
+        rows.append([
+            InlineKeyboardButton(f"{'✅' if g['id'] == active else '▶️'} {i}. {g['title']}"[:40],
+                                 callback_data=f"sw:{g['id']}"),
+            InlineKeyboardButton(f"🗑 {i}", callback_data=f"rm:{g['id']}"),
+        ])
+    rows.append([InlineKeyboardButton("➕ Новая кампания", callback_data="go:new")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def owns(update: Update, campaign_id: str) -> bool:
+    """Callback data is client-supplied: check the id belongs to this user."""
+    user = update.effective_user
+    return bool(user) and any(g["id"] == campaign_id
+                              for g in campaign.list_for(user.id))
+
+
+async def cmd_games(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorised(update):
+        return await deny(update)
+    text, kb = games_view(update.effective_user.id,
+                          campaign.active_id(update.effective_chat.id))
     await update.effective_message.reply_text(
-        WELCOME, parse_mode=constants.ParseMode.HTML, reply_markup=size_keyboard())
+        text, parse_mode=constants.ParseMode.HTML, reply_markup=kb)
+
+
+async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorised(update):
+        return await deny(update)
+    ok, missing = campaign.pack_ready()
+    if not ok:
+        await update.effective_message.reply_text(
+            "Пак модуля не готов — не хватает: " + ", ".join(missing))
+        return
+    await begin_onboarding(update, context)
+
+
+async def cmd_rename(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorised(update):
+        return await deny(update)
+    cid = campaign.active_id(update.effective_chat.id)
+    title = " ".join(context.args).strip()[:60] if context.args else ""
+    if not cid:
+        await update.effective_message.reply_text("Сейчас нет активной кампании. /games")
+        return
+    if not title:
+        await update.effective_message.reply_text(
+            "Напиши новое название после команды: /rename Дилион на острове")
+        return
+    campaign.rename(cid, title)
+    await update.effective_message.reply_text(
+        f"Кампания теперь называется <b>{html.escape(title)}</b>.",
+        parse_mode=constants.ParseMode.HTML)
+
+
+async def switch_to(update: Update, context: ContextTypes.DEFAULT_TYPE, cid: str):
+    q = update.callback_query
+    chat_id = update.effective_chat.id
+    if cid == campaign.active_id(chat_id) and REGISTRY.get(chat_id) is not None:
+        await q.edit_message_text("Эта кампания и так идёт — просто пиши свой ход.")
+        return
+    # Drop the DM session: it holds the old campaign's history and paths.
+    await REGISTRY.close(chat_id)
+    campaign.set_active(chat_id, cid)
+    context.chat_data.clear()
+    title = campaign.summary(cid)["title"]
+    await q.edit_message_text(f"Переключаюсь на «{title}»…")
+    await run_turn(update, context,
+                   "Игрок вернулся к игре. Кратко напомни, где отряд "
+                   "и что происходит, затем продолжи сцену.")
+
+
+async def trash_campaign(update: Update, cid: str) -> None:
+    chat_id = update.effective_chat.id
+    if cid == campaign.active_id(chat_id):
+        await REGISTRY.close(chat_id)
+        campaign.set_active(chat_id, None)
+    where = campaign.trash(cid)
+    log.info("chat %s: campaign %s moved to %s", chat_id, cid, where)
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -280,15 +401,51 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     data = q.data or ""
 
+    if data == "games":
+        text, kb = games_view(update.effective_user.id,
+                              campaign.active_id(update.effective_chat.id))
+        await q.edit_message_text(text, parse_mode=constants.ParseMode.HTML,
+                                  reply_markup=kb)
+        return
+
+    if data.startswith(("sw:", "rm:", "rmy:")):
+        action, cid = data.split(":", 1)
+        if not owns(update, cid):
+            await q.edit_message_text("Такой кампании нет. /games")
+            return
+        if action == "sw":
+            await switch_to(update, context, cid)
+        elif action == "rm":
+            title = campaign.summary(cid)["title"]
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("🗑 Да, в корзину", callback_data=f"rmy:{cid}"),
+                InlineKeyboardButton("↩️ Назад", callback_data="games"),
+            ]])
+            await q.edit_message_text(
+                f"Убрать «{title}» в корзину? Файлы не стираются — "
+                "владелец бота сможет вернуть.", reply_markup=kb)
+        else:
+            await trash_campaign(update, cid)
+            text, kb = games_view(update.effective_user.id,
+                                  campaign.active_id(update.effective_chat.id))
+            await q.edit_message_text("🗑 Убрано в корзину.\n\n" + text,
+                                      parse_mode=constants.ParseMode.HTML,
+                                      reply_markup=kb)
+        return
+
     if data.startswith("go:"):
         if data == "go:reset":
-            await REGISTRY.close(update.effective_chat.id)
-            campaign.delete(update.effective_chat.id)
-            context.chat_data.clear()
-            context.chat_data[K_STAGE] = "size"
-            context.chat_data[K_PARTY] = []
-            await q.edit_message_text(WELCOME, parse_mode=constants.ParseMode.HTML,
-                                      reply_markup=size_keyboard())
+            cid = campaign.active_id(update.effective_chat.id)
+            if cid:
+                await trash_campaign(update, cid)
+            await begin_onboarding(update, context, edit=True)
+        elif data == "go:new":
+            ok, missing = campaign.pack_ready()
+            if not ok:
+                await q.edit_message_text(
+                    "Пак модуля не готов — не хватает: " + ", ".join(missing))
+                return
+            await begin_onboarding(update, context, edit=True)
         else:
             await q.edit_message_text("Возвращаемся к игре…")
             await run_turn(update, context,
@@ -352,7 +509,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Party complete — build the campaign and open the table.
         context.chat_data[K_STAGE] = None
         chat_id = update.effective_chat.id
-        cdir = campaign.create(chat_id, party)
+        cdir = campaign.create(chat_id, party, owner=update.effective_user.id)
         roster = "\n".join(f"• <b>{html.escape(p['name'])}</b> — {p['race']} {p['klass']}"
                            for p in party)
         opening = ("Отряд собран:\n"
@@ -455,11 +612,16 @@ async def cmd_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorised(update):
         return await deny(update)
+    if not campaign.exists(update.effective_chat.id):
+        await update.effective_message.reply_text("Сейчас нет активной кампании. /games")
+        return
     kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🗑 Да, стереть", callback_data="go:reset"),
+        InlineKeyboardButton("🗑 Да, в корзину и начать новую", callback_data="go:reset"),
     ]])
     await update.effective_message.reply_text(
-        "Стереть кампанию со всеми персонажами и прогрессом?", reply_markup=kb)
+        "Убрать текущую кампанию в корзину и собрать новый отряд? "
+        "Другие кампании не пострадают, а эту владелец бота сможет вернуть.",
+        reply_markup=kb)
 
 
 def acquire_single_instance_lock():
@@ -521,6 +683,9 @@ def main():
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("games", cmd_games))
+    app.add_handler(CommandHandler("new", cmd_new))
+    app.add_handler(CommandHandler("rename", cmd_rename))
     app.add_handler(CommandHandler("party", cmd_party))
     app.add_handler(CommandHandler("sheet", cmd_sheet))
     app.add_handler(CommandHandler("map", cmd_map))
