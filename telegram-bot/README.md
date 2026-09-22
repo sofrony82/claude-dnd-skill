@@ -165,8 +165,11 @@ is written for four; fewer is playable and more dangerous.
 | `/sheet [name]` | character sheet, read from the files |
 | `/map [n]` | show a map — the current one, or map `n` |
 | `/recap` | where you are and what is going on |
-| `/save` | flush state and sheets to disk |
+| `/save` | save right now — rarely needed, see below |
 | `/reset` | move the current campaign to the trash and start over |
+
+The same commands, minus `/save`, are behind the **Menu** button next to the
+input field; the bot registers them on startup.
 
 Everything else you type is your turn. Write freely, for the whole party
 («идём в храм, Дарин осматривает статую») or in character.
@@ -254,6 +257,29 @@ bot token; a second one does not queue, it knocks the first offline and both go
 half-deaf. `bot.py` takes a file lock and refuses to start if another instance
 holds it. Running the bot on two hosts means two tokens.
 
+## Saving
+
+There is nothing the player has to do. Three layers, each covering the one
+above it:
+
+1. **The DM saves** `state.md` and the sheets at scene boundaries, as the prompt
+   asks. On DeepSeek the loop also reminds it after `DND_SAVE_REMIND_TURNS`
+   turns without a save.
+2. **Before leaving a campaign** — switching in `/games`, or `/new` — the bot
+   asks the DM to save if anything was played since the last save, and shows
+   «💾 Сохраняю кампанию…» while it does.
+3. **On resume**, the DM is handed the log of everything played after the last
+   save. Every turn in which the DM wrote `state.md` moves a save point
+   (`.saved.json`: how far into `raw-log.md` the save reaches); what lies past
+   it goes into the system prompt as «ЧТО БЫЛО ПОСЛЕ ПОСЛЕДНЕГО СОХРАНЕНИЯ»,
+   and the DM continues from the end of it. So a crash or a restart loses
+   nothing that reached the log, even if the DM never saved.
+
+Campaigns from before save points have no `.saved.json` until their first
+saving turn. For them, a `state.md` written within five minutes of the last
+log entry counts as current; otherwise the DM gets the end of the log, marked
+as possibly overlapping what `state.md` already holds.
+
 ## State on disk
 
 ```
@@ -262,6 +288,7 @@ holds it. Running the bot on two hosts means two tokens.
     state.md          current scene, quests, world state
     session-log.md    what happened
     raw-log.md        verbatim transcript
+    .saved.json       how far into raw-log.md the last save reaches
     characters/*.md   one sheet per character
 ~/.claude/dnd/campaigns/.trash/<campaign_id>-<stamp>/
                       campaigns deleted from the bot

@@ -25,6 +25,7 @@ import sys
 
 from telegram.error import NetworkError, TimedOut
 from telegram import (
+    BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Update,
@@ -64,7 +65,29 @@ REGISTRY = engine.new_registry()
 
 # Names used in the written transcript. They match what Telegram shows, so a
 # hand-saved chat export and the bot's own log are the same document.
-BOT_SPEAKER = "DnD Master"
+BOT_SPEAKER = transcript.BOT_SPEAKER
+
+SAVE_REQUEST = ("Сохрани состояние: обнови файл состояния (текущая сцена, "
+                "локация, квесты, состояние мира) и листы персонажей "
+                "(хиты, ресурсы, инвентарь, опыт). Затем подтверди одной "
+                "строкой — что именно записано, человеческим языком, без имён "
+                "файлов и путей. Сцену не двигай.")
+
+# A save before switching away runs while the player waits on a status line.
+# Past this, give up: the log tail covers the gap on resume anyway.
+LEAVE_SAVE_TIMEOUT = 120
+
+# The "Menu" button beside the input field. /save is left out on purpose: the
+# bot saves on its own, and a button invites the idea that it must be pressed.
+MENU = [
+    ("games", "Мои кампании — переключиться, новая, корзина"),
+    ("recap", "Где мы и что происходит"),
+    ("sheet", "Лист персонажа"),
+    ("party", "Состав отряда"),
+    ("map", "Карта текущей местности"),
+    ("new", "Новая кампания (текущая сохранится)"),
+    ("help", "Все команды"),
+]
 
 
 def log_player(update: Update) -> None:
@@ -107,7 +130,7 @@ HELP = (
     "/sheet — лист персонажа\n"
     "/map — показать карту текущей местности\n"
     "/recap — краткий пересказ: где мы и что происходит\n"
-    "/save — записать состояние кампании в файлы\n"
+    "/save — сохранить прямо сейчас (обычно не нужно: бот сохраняет сам)\n"
     "/reset — убрать текущую кампанию в корзину\n"
     "/help — эта справка\n\n"
     "Всё остальное просто пиши текстом — это твой ход. "
@@ -217,6 +240,8 @@ async def run_turn(update: Update, context: ContextTypes.DEFAULT_TYPE, player_te
                 prompts.onboarding_summary(party["party"]),
                 MODULE_DIR, campaign.campaign_dir(chat_id), BACKEND),
         )
+    cdir = campaign.campaign_dir(chat_id)
+    saved_before = transcript.state_mtime(cdir)
     async with typing(context, chat_id):
         try:
             reply = await session.ask(player_text)
@@ -231,6 +256,39 @@ async def run_turn(update: Update, context: ContextTypes.DEFAULT_TYPE, player_te
     else:
         await update.effective_message.reply_text(
             "Мастер промолчал. Повтори ход или уточни, что делаешь.")
+    # The DM wrote state.md this turn: everything logged so far is covered.
+    if transcript.state_mtime(cdir) != saved_before:
+        transcript.mark_saved(cdir)
+
+
+async def save_before_leaving(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                              say) -> bool:
+    """Have the DM save the active campaign before the chat leaves it.
+
+    Only when there is something to save and a live session that remembers it:
+    after a restart the session is gone, and the log tail handed over on resume
+    is all that is left to go on anyway. `say` shows a status line. Returns
+    whether a save was attempted.
+    """
+    chat_id = update.effective_chat.id
+    session = REGISTRY.get(chat_id)
+    cdir = campaign.campaign_dir(chat_id)
+    if session is None or not campaign.exists(chat_id) or not transcript.has_unsaved(cdir):
+        return False
+    await say("💾 Сохраняю кампанию…")
+    before = transcript.state_mtime(cdir)
+    try:
+        async with typing(context, chat_id):
+            await asyncio.wait_for(session.ask(SAVE_REQUEST), LEAVE_SAVE_TIMEOUT)
+    except Exception as e:                          # noqa: BLE001
+        log.warning("chat %s: save before leaving failed: %s: %s",
+                    chat_id, type(e).__name__, e)
+    if transcript.state_mtime(cdir) != before:
+        transcript.mark_saved(cdir)
+    else:
+        log.warning("chat %s: DM did not write state before leaving; "
+                    "the log tail will carry it", chat_id)
+    return True
 
 
 # ── onboarding ───────────────────────────────────────────────────────────
@@ -347,6 +405,7 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(
             "Пак модуля не готов — не хватает: " + ", ".join(missing))
         return
+    await save_before_leaving(update, context, update.effective_message.reply_text)
     await begin_onboarding(update, context)
 
 
@@ -374,6 +433,7 @@ async def switch_to(update: Update, context: ContextTypes.DEFAULT_TYPE, cid: str
     if cid == campaign.active_id(chat_id) and REGISTRY.get(chat_id) is not None:
         await q.edit_message_text("Эта кампания и так идёт — просто пиши свой ход.")
         return
+    await save_before_leaving(update, context, q.edit_message_text)
     # Drop the DM session: it holds the old campaign's history and paths.
     await REGISTRY.close(chat_id)
     campaign.set_active(chat_id, cid)
@@ -445,6 +505,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await q.edit_message_text(
                     "Пак модуля не готов — не хватает: " + ", ".join(missing))
                 return
+            await save_before_leaving(update, context, q.edit_message_text)
             await begin_onboarding(update, context, edit=True)
         else:
             await q.edit_message_text("Возвращаемся к игре…")
@@ -601,12 +662,7 @@ async def cmd_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorised(update):
         return await deny(update)
     log_player(update)
-    await run_turn(update, context,
-                   "Сохрани состояние: обнови файл состояния (текущая сцена, "
-                   "локация, квесты, состояние мира) и листы персонажей "
-                   "(хиты, ресурсы, инвентарь, опыт). Затем подтверди одной "
-                   "строкой — что именно записано, человеческим языком, без имён "
-                   "файлов и путей. Сцену не двигай.")
+    await run_turn(update, context, SAVE_REQUEST)
 
 
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -662,6 +718,13 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     log.exception("handler error", exc_info=err)
 
 
+async def post_init(app: Application):
+    try:
+        await app.bot.set_my_commands([BotCommand(c, d) for c, d in MENU])
+    except Exception as e:                          # noqa: BLE001
+        log.warning("could not set the command menu: %s", e)
+
+
 async def post_shutdown(app: Application):
     await REGISTRY.close_all()
 
@@ -678,6 +741,7 @@ def main():
 
     app = (Application.builder()
            .token(token())
+           .post_init(post_init)
            .post_shutdown(post_shutdown)
            .build())
 

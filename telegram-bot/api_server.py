@@ -60,7 +60,7 @@ app = FastAPI(
 )
 
 REGISTRY = engine.new_registry()
-BOT_SPEAKER = "DnD Master"
+BOT_SPEAKER = transcript.BOT_SPEAKER
 
 
 # ── payloads ─────────────────────────────────────────────────────────────
@@ -156,6 +156,7 @@ async def turn(req: Turn):
     cdir = campaign.campaign_dir(req.chat_id)
 
     transcript.append(cdir, "Player", req.text)
+    saved_before = transcript.state_mtime(cdir)
 
     used: list = []
     sandbox = getattr(session, "sandbox", None)
@@ -175,6 +176,8 @@ async def turn(req: Turn):
     narration, maps = tg_format.extract_maps(raw)
     if narration:
         transcript.append(cdir, BOT_SPEAKER, narration)
+    if transcript.state_mtime(cdir) != saved_before:
+        transcript.mark_saved(cdir)
 
     new_rolls = sandbox.rolls[rolls_before:] if sandbox else []
     return {

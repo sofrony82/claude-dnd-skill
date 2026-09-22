@@ -180,6 +180,107 @@ class TranscriptTests(unittest.TestCase):
             self.t.path_for(self.dir).read_text(encoding="utf-8").count("> Sofrony:"), 50)
 
 
+class SavePointTests(unittest.TestCase):
+    """What a resuming DM is told about play that state.md may not hold."""
+
+    @classmethod
+    def setUpClass(cls):
+        _import("config")
+        cls.t = _import("transcript")
+        cls.p = _import("prompts")
+
+    def setUp(self):
+        import tempfile
+        self.dir = pathlib.Path(tempfile.mkdtemp())
+        (self.dir / "state.md").write_text("## Current Situation\n", encoding="utf-8")
+
+    def say(self, who, text):
+        self.t.append(self.dir, who, text)
+
+    def age_state(self, seconds=60):
+        import os
+        import time
+        t = time.time() - seconds
+        os.utime(self.dir / "state.md", (t, t))
+
+    def test_fresh_campaign_has_nothing_pending(self):
+        self.t.mark_saved(self.dir)
+        self.say("DnD Master", "Отряд собран.")
+        self.assertIsNone(self.t.pending(self.dir))
+
+    def test_turns_after_the_save_are_pending(self):
+        self.say("Sofrony", "иду вверх")
+        self.say("DnD Master", "Тропа крутая.")
+        self.t.mark_saved(self.dir)
+        self.say("Sofrony", "стреляю лучом холода")
+        self.say("DnD Master", "Гарпия теряет 6 хитов.")
+        tail = self.t.pending(self.dir)
+        self.assertEqual(tail["player_turns"], 1)
+        self.assertTrue(tail["exact"])
+        self.assertNotIn("иду вверх", tail["text"])
+        self.assertIn("> Sofrony:\nстреляю лучом холода", tail["text"])
+        self.assertIn("Гарпия теряет 6 хитов.", tail["text"])
+        self.assertTrue(self.t.has_unsaved(self.dir))
+
+    def test_marking_again_clears_it(self):
+        self.say("Sofrony", "ход")
+        self.t.mark_saved(self.dir)
+        self.assertFalse(self.t.has_unsaved(self.dir))
+
+    def test_lookups_are_not_play(self):
+        self.t.mark_saved(self.dir)
+        self.say("Sofrony", "/sheet")
+        self.say("DnD Master", "Хиты 7 из 7.")
+        self.assertIsNone(self.t.pending(self.dir))
+
+    def test_no_save_point_and_state_newer_than_log(self):
+        self.say("Sofrony", "ход")
+        import os
+        import time
+        t = time.time() + 5
+        os.utime(self.dir / "state.md", (t, t))
+        self.assertIsNone(self.t.pending(self.dir))
+
+    def test_no_save_point_and_state_written_during_the_last_turn(self):
+        # The DM saves mid-turn; the narration lands in the log seconds later.
+        self.say("Sofrony", "ход")
+        self.age_state(15)
+        self.assertIsNone(self.t.pending(self.dir))
+
+    def test_no_save_point_and_state_older_takes_the_end_as_a_guess(self):
+        self.say("Sofrony", "ход")
+        self.age_state(3600)
+        tail = self.t.pending(self.dir)
+        self.assertFalse(tail["exact"])
+        self.assertIn("ход", tail["text"])
+
+    def test_save_point_past_the_end_is_ignored(self):
+        self.say("Sofrony", "ход")
+        (self.dir / self.t.CHECKPOINT).write_text('{"raw_log_bytes": 999999}')
+        self.age_state(3600)
+        self.assertFalse(self.t.pending(self.dir)["exact"])
+
+    def test_tail_is_capped_on_whole_entries(self):
+        self.t.mark_saved(self.dir)
+        for i in range(40):
+            self.say("Sofrony", f"ход {i} " + "я" * 200)
+        tail = self.t.pending(self.dir, limit=2000)
+        self.assertTrue(tail["truncated"])
+        self.assertEqual(tail["player_turns"], 40)
+        self.assertLessEqual(len(tail["text"]), 2000)
+        self.assertTrue(tail["text"].startswith("> Sofrony:\nход "))
+        self.assertIn("ход 39", tail["text"])
+
+    def test_prompt_carries_the_tail_only_when_there_is_one(self):
+        self.t.mark_saved(self.dir)
+        prompt = self.p.build_system_prompt("- X", self.dir, self.dir, "deepseek")
+        self.assertNotIn("ПОСЛЕ ПОСЛЕДНЕГО СОХРАНЕНИЯ", prompt)
+        self.say("Sofrony", "открываю сундук")
+        prompt = self.p.build_system_prompt("- X", self.dir, self.dir, "deepseek")
+        self.assertIn("ПОСЛЕ ПОСЛЕДНЕГО СОХРАНЕНИЯ", prompt)
+        self.assertIn("открываю сундук", prompt)
+
+
 class CampaignTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

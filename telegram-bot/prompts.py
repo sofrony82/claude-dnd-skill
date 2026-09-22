@@ -9,6 +9,7 @@ straight through.
 
 import pathlib
 
+import transcript
 from config import DND_SKILL_DIR
 
 
@@ -254,6 +255,31 @@ npcs.md, arc.md и source/1.1.md, затем открой сцену прибы�
 ячейками, спасбросками от смерти и угрозами, что там указаны. Прочитай world.md,
 npcs.md и файл главы, в которой находится партия. Карту текущей локации покажи
 заново — после перезапуска игрок её не видел.
+{_unsaved_block(campaign_dir)}"""
+
+
+def _unsaved_block(campaign_dir: pathlib.Path) -> str:
+    """Play the log holds but state.md may not: the turns after the last save."""
+    tail = transcript.pending(campaign_dir)
+    if not tail:
+        return ""
+    overlap = ("" if tail["exact"] else
+               " Точной отметки сохранения нет, поэтому начало отрывка может "
+               "повторять то, что в state.md уже записано.")
+    cut = " Начало отрывка обрезано." if tail["truncated"] else ""
+    return f"""
+ЧТО БЫЛО ПОСЛЕ ПОСЛЕДНЕГО СОХРАНЕНИЯ
+Прошлая сессия закончилась раньше, чем ты успел записать state.md. Ниже —
+дословный журнал игры после последнего сохранения ({tail["player_turns"]} ход(ов) игрока).{overlap}{cut}
+
+Это было на самом деле. Где журнал и state.md расходятся — место, хиты, ячейки,
+враги, добыча, — верен журнал. Продолжай с конца журнала: не пересказывай его
+целиком и не отыгрывай заново. В первый же ход обнови state.md и листы
+персонажей так, чтобы они учитывали эти события.
+
+<журнал>
+{tail["text"]}
+</журнал>
 """
 
 

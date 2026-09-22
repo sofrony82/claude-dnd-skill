@@ -31,6 +31,7 @@ import shutil
 import unicodedata
 from datetime import date, datetime
 
+import transcript
 from config import CAMPAIGNS_DIR, CHATS_DIR, MODULE_DIR, PREGENS
 
 TRASH_DIR = CAMPAIGNS_DIR / ".trash"
@@ -208,6 +209,8 @@ def create(chat_id: int, party: list, owner=None, campaign_id=None) -> pathlib.P
     (cdir / "session-log.md").write_text(
         f"# Журнал кампании\n\n*Сессия 1 начата {date.today().isoformat()}.*\n",
         encoding="utf-8")
+    # A fresh campaign is fully saved: nothing in the log is newer than state.
+    transcript.mark_saved(cdir)
     set_active(chat_id, cid)
     return cdir
 
