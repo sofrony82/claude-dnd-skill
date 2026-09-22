@@ -1,0 +1,12 @@
+# The DeepSeek backend only — no claude-agent-sdk.
+#
+# This is what the VM installs: it runs the DM on
+# deepseek-ai/DeepSeek-V4.1-Flash via Nebius Token Factory and has no use for
+# the Claude SDK (or the Claude CLI it expects to find on PATH).
+#
+#   python3 -m venv .venv && .venv/bin/pip install -r requirements-deepseek.txt
+python-telegram-bot[rate-limiter]==22.8
+openai>=1.40.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0

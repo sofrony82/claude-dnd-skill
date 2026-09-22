@@ -93,3 +93,45 @@ PREGENS = [
     ("rogue-halfling", "Плут",       "Легконогий полурослик", "🗡"),
     ("wizard-elf",     "Волшебник",  "Высший эльф",           "✨"),
 ]
+
+
+# ── Backend ──────────────────────────────────────────────────────────────
+# "claude"  — the Claude Agent SDK (dm_engine.py); the SDK owns the agent loop.
+# "deepseek" — DeepSeek on Nebius Token Factory (ds_engine.py); the loop is ours.
+BACKEND = os.environ.get("DND_BACKEND", "claude").strip().lower()
+
+DS_BASE_URL = os.environ.get(
+    "NB_BASE_URL", "https://api.tokenfactory.nebius.com/v1").rstrip("/")
+DS_MODEL = os.environ.get("DND_DS_MODEL", "deepseek-ai/DeepSeek-V4.1-Flash")
+
+# Warm prose, not code: DeepSeek's own guidance puts creative writing near 1.0,
+# and at 0.2 the DM repeats sentence shapes within a single scene.
+DS_TEMPERATURE = float(os.environ.get("DND_DS_TEMPERATURE", "0.8"))
+DS_MAX_TOKENS = int(os.environ.get("DND_DS_MAX_TOKENS", "3000"))
+
+# Tool calls the DM may make inside ONE player turn before the loop gives up.
+# Opening a chapter legitimately costs a dozen: world, npcs, arc, the chapter
+# source, then a few rolls.
+DS_MAX_STEPS = int(os.environ.get("DND_DS_MAX_STEPS", "24"))
+
+# Player turns kept verbatim before the window is trimmed on a turn boundary.
+HISTORY_TURNS = int(os.environ.get("DND_HISTORY_TURNS", "12"))
+
+
+def _nebius_key() -> str:
+    """Nebius token, from the environment or a key file next to the repo.
+
+    Same shape as `token()` above: resolved lazily and never logged, so importing
+    settings does not require a live secret.
+    """
+    key = os.environ.get("NB_STUDIO_API_KEY", "").strip()
+    if not key:
+        for name in (".nebius_apikey", ".nb_studio_apikey"):
+            f = REPO_ROOT / name
+            if f.is_file():
+                key = f.read_text(encoding="utf-8").strip()
+                break
+    return key
+
+
+DS_KEY = _nebius_key()

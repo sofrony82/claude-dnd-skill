@@ -1,2 +1,13 @@
+# Shared front end.
 python-telegram-bot[rate-limiter]==22.8
+
+# Claude backend — DND_BACKEND=claude. The SDK owns the agent loop.
 claude-agent-sdk>=0.2.157
+
+# DeepSeek backend — DND_BACKEND=deepseek — and the direct-query API server.
+# Installed separately on hosts that run only this backend; see
+# requirements-deepseek.txt.
+openai>=1.40.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0

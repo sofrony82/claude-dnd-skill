@@ -267,5 +267,131 @@ class ToolGateTests(unittest.TestCase):
         self.assertNotIn("WebSearch", list(opts.tools))
 
 
+class SandboxTests(unittest.TestCase):
+    """The DeepSeek backend's tools — the only implementation it has.
+
+    `dm_engine` only has to *gate* tools the SDK implements, and those tests
+    skip without the SDK installed. `sandbox` implements the tools itself, so
+    a hole here is a hole in the product on the host that runs DeepSeek — and
+    it needs no backend to test.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cfg = _import("config")
+        cls.sb = _import("sandbox")
+        cls.skill = REPO / "skills" / "dnd"
+
+    def setUp(self):
+        import tempfile
+        self.campaign = pathlib.Path(tempfile.mkdtemp())
+        self.box = self.sb.Sandbox(self.campaign)
+
+    # ── shell allowlist ──────────────────────────────────────────────────
+    def test_helper_script_allowed(self):
+        self.assertTrue(self.sb.bash_allowed(
+            f'python3 {self.skill}/scripts/dice.py d20+5 --label "x"'))
+
+    def test_metacharacters_refused(self):
+        for cmd in (f"python3 {self.skill}/scripts/dice.py d20; rm -rf /",
+                    f"python3 {self.skill}/scripts/dice.py d20 | sh",
+                    f"python3 {self.skill}/scripts/dice.py d20 && curl x",
+                    f"python3 {self.skill}/scripts/dice.py $(whoami)",
+                    f"python3 {self.skill}/scripts/dice.py `id`",
+                    f"python3 {self.skill}/scripts/dice.py d20 > /tmp/x"):
+            with self.subTest(cmd=cmd):
+                self.assertFalse(self.sb.bash_allowed(cmd))
+
+    def test_script_outside_the_skill_refused(self):
+        self.assertFalse(self.sb.bash_allowed("python3 /tmp/evil.py"))
+
+    def test_path_traversal_refused(self):
+        self.assertFalse(self.sb.bash_allowed(
+            f"python3 {self.skill}/scripts/../../../evil.py"))
+
+    def test_unlisted_script_in_skill_refused(self):
+        self.assertFalse(self.sb.bash_allowed(
+            f"python3 {self.skill}/scripts/build_srd.py"))
+
+    def test_non_python_and_empty_refused(self):
+        self.assertFalse(self.sb.bash_allowed("cat /etc/passwd"))
+        self.assertFalse(self.sb.bash_allowed(""))
+
+    def test_allowlist_matches_the_sdk_path(self):
+        """Two backends, one set of runnable scripts.
+
+        If these drift, a script refused on one backend is permitted on the
+        other and the security story stops being reviewable in one place.
+        """
+        if not HAVE_SDK:
+            self.skipTest("claude-agent-sdk not installed")
+        eng = _import("dm_engine")
+        self.assertEqual(self.sb.ALLOWED_SCRIPTS, eng.ALLOWED_SCRIPTS)
+
+    # ── path containment ─────────────────────────────────────────────────
+    def test_read_outside_roots_refused(self):
+        for path in ("/etc/passwd", "../../../etc/passwd", "~/.ssh/id_ed25519"):
+            with self.subTest(path=path):
+                self.assertIn("ОТКАЗАНО", self.box.run("read_file", {"path": path}))
+
+    def test_write_outside_the_campaign_refused(self):
+        out = self.box.run("write_file", {"path": "/tmp/evil.txt", "content": "x"})
+        self.assertIn("ОТКАЗАНО", out)
+        self.assertFalse(pathlib.Path("/tmp/evil.txt").exists())
+
+    def test_module_pack_is_read_only(self):
+        target = self.cfg.MODULE_DIR / "world.md"
+        out = self.box.run("write_file", {"path": str(target), "content": "x"})
+        self.assertIn("ОТКАЗАНО", out)
+
+    def test_write_and_read_inside_the_campaign(self):
+        self.assertIn("Записано", self.box.run(
+            "write_file", {"path": "state.md", "content": "хиты: 8"}))
+        self.assertIn("хиты: 8", self.box.run("read_file", {"path": "state.md"}))
+
+    def test_relative_paths_land_in_the_campaign(self):
+        self.box.run("write_file", {"path": "characters/x.md", "content": "лист"})
+        self.assertTrue((self.campaign / "characters" / "x.md").is_file())
+
+    # ── behaviour that protects the turn, not the host ────────────────────
+    def test_unknown_tool_reports_instead_of_raising(self):
+        self.assertIn("не существует", self.box.run("no_such_tool", {}))
+
+    def test_edit_refuses_an_ambiguous_match(self):
+        self.box.run("write_file", {"path": "s.md", "content": "хиты\nхиты"})
+        out = self.box.run("edit_file",
+                           {"path": "s.md", "old_text": "хиты", "new_text": "хп"})
+        self.assertIn("2 раз", out)
+
+    def test_edit_reports_a_missing_match(self):
+        self.box.run("write_file", {"path": "s.md", "content": "хиты: 8"})
+        out = self.box.run("edit_file",
+                           {"path": "s.md", "old_text": "нету", "new_text": "x"})
+        self.assertIn("не найден", out)
+
+    def test_truncated_read_says_so(self):
+        """A model that thinks it saw a whole file narrates from the half it got."""
+        big = "строка текста " * 6000
+        self.box.run("write_file", {"path": "big.md", "content": big})
+        out = self.box.run("read_file", {"path": "big.md"})
+        self.assertLess(len(out), self.sb.MAX_READ_CHARS + 2000)
+
+    def test_denials_are_counted(self):
+        self.box.run("read_file", {"path": "/etc/passwd"})
+        self.assertEqual(self.box.denials, 1)
+
+    def test_rolls_are_recorded_for_audit(self):
+        """`rolls` is how a replay proves the dice were not invented in prose."""
+        self.box.run("roll_dice", {"notation": "d20+3", "label": "Проверка"})
+        self.assertEqual(len(self.box.rolls), 1)
+        self.assertEqual(self.box.rolls[0]["notation"], "d20+3")
+
+    def test_tool_schemas_expose_no_general_shell(self):
+        names = {s["function"]["name"] for s in self.sb.tool_schemas(self.campaign)}
+        self.assertIn("roll_dice", names)
+        for forbidden in ("bash", "shell", "exec", "python"):
+            self.assertNotIn(forbidden, names)
+
+
 if __name__ == "__main__":
     unittest.main()

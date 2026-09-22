@@ -51,7 +51,45 @@ DM_STANDARDS = """
 """
 
 
-def _table_rules(party_block: str, module_dir: pathlib.Path, campaign_dir: pathlib.Path) -> str:
+# The dice and file-access rules name actual tools, and the two backends do not
+# expose the same ones: the SDK path gets Bash/Read/Write, the DeepSeek path gets
+# the functions defined in sandbox.py. Naming a tool the model does not have is
+# not a harmless inaccuracy — it invents dice rather than admit it cannot roll.
+_DICE_BASH = f"""БРОСКИ КОСТЕЙ — ОБЯЗАТЕЛЬНО ЧЕРЕЗ СКРИПТ
+Каждый бросок в игре — проверка, атака, спасбросок, урон, случайная таблица —
+делается вызовом Bash. Никогда не придумывай результат броска в уме.
+
+  python3 {DND_SKILL_DIR}/scripts/dice.py d20+5 --label "Проверка Внимательности"
+  python3 {DND_SKILL_DIR}/scripts/dice.py 2d8+3 --label "Урон длинным мечом"
+  python3 {DND_SKILL_DIR}/scripts/dice.py d20 adv --label "Атака с преимуществом"
+"""
+
+_DICE_TOOL = """БРОСКИ КОСТЕЙ — ОБЯЗАТЕЛЬНО ЧЕРЕЗ ИНСТРУМЕНТ roll_dice
+Каждый бросок в игре — проверка, атака, спасбросок, урон, случайная таблица —
+делается вызовом roll_dice. Никогда не придумывай результат броска в уме и
+никогда не пиши в тексте бросок, которого не было: если в ответе стоит
+"🎲 d20+3 → 17", значит roll_dice вернул именно это.
+
+  roll_dice(notation="d20+5", label="Проверка Внимательности")
+  roll_dice(notation="2d8+3", label="Урон длинным мечом")
+  roll_dice(notation="d20 adv", label="Атака с преимуществом")
+
+Нужно несколько бросков (атака и урон, два врага) — вызывай roll_dice несколько
+раз, по одному на каждый бросок.
+"""
+
+_FILES_SDK = """  Чтение — инструмент Read, запись — Write и Edit, поиск — Glob и Grep."""
+
+_FILES_TOOL = """  Чтение — read_file, запись — write_file, точечная правка — edit_file,
+  поиск файлов — glob_files, поиск текста — grep_files.
+  npcs-full.md и source/*.md большие: не читай их целиком, а найди нужное место
+  через grep_files и дочитай через read_file(path, offset=..., limit=...)."""
+
+
+def _table_rules(party_block: str, module_dir: pathlib.Path,
+                 campaign_dir: pathlib.Path, backend: str = "claude") -> str:
+    dice = _DICE_TOOL if backend == "deepseek" else _DICE_BASH
+    files = _FILES_TOOL if backend == "deepseek" else _FILES_SDK
     return f"""
 ОТРЯД
 {party_block}
@@ -61,16 +99,12 @@ def _table_rules(party_block: str, module_dir: pathlib.Path, campaign_dir: pathl
 ("идём в храм"), веди всех, но сохраняй индивидуальность каждого персонажа
 в репликах и реакциях.
 
-БРОСКИ КОСТЕЙ — ОБЯЗАТЕЛЬНО ЧЕРЕЗ СКРИПТ
-Каждый бросок в игре — проверка, атака, спасбросок, урон, случайная таблица —
-делается вызовом Bash. Никогда не придумывай результат броска в уме.
-
-  python3 {DND_SKILL_DIR}/scripts/dice.py d20+5 --label "Проверка Внимательности"
-  python3 {DND_SKILL_DIR}/scripts/dice.py 2d8+3 --label "Урон длинным мечом"
-  python3 {DND_SKILL_DIR}/scripts/dice.py d20 adv --label "Атака с преимуществом"
-
+{dice}
 Показывай игроку и сам бросок, и математику: "🎲 d20+5 → 14+5 = 19 против СЛ 15 —
 успех". Натуральная 20 и натуральная 1 — всегда отдельный драматический момент.
+
+ИНСТРУМЕНТЫ ДЛЯ ФАЙЛОВ
+{files}
 
 КАРТЫ
 Когда партия впервые попадает в локацию, к которой есть карта, вставь в ответ
@@ -133,7 +167,7 @@ def _table_rules(party_block: str, module_dir: pathlib.Path, campaign_dir: pathl
 
 
 def build_system_prompt(party_block: str, module_dir: pathlib.Path,
-                        campaign_dir: pathlib.Path) -> str:
+                        campaign_dir: pathlib.Path, backend: str = "claude") -> str:
     return f"""Ты — Мастер (Dungeon Master) в игре Dungeons & Dragons 5-й редакции
 (правила 2014, SRD 5.1). Ты ведёшь стартовое приключение "Драконы острова
 Штормокрушений" для одного игрока, который отыгрывает всю партию.
@@ -142,7 +176,7 @@ def build_system_prompt(party_block: str, module_dir: pathlib.Path,
 Мир опасен, но справедлив: это вводное приключение, гибель персонажа возможна,
 но не должна быть случайной или произвольной.
 {DM_STANDARDS}
-{_table_rules(party_block, module_dir, campaign_dir)}
+{_table_rules(party_block, module_dir, campaign_dir, backend)}
 
 НАЧАЛО ИГРЫ
 Если это первый ход сессии, прочитай world.md, npcs.md, arc.md и source/1.1.md,

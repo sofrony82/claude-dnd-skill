@@ -41,12 +41,13 @@ import tg_format
 import transcript
 from config import (
     ALLOWED_USERS,
+    BACKEND,
     MAX_PARTY,
     MIN_PARTY,
     MODULE_DIR,
     token,
 )
-from dm_engine import SessionRegistry
+import engine
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)-7s %(name)s — %(message)s",
@@ -55,7 +56,7 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("bot")
 
-REGISTRY = SessionRegistry()
+REGISTRY = engine.new_registry()
 
 # Names used in the written transcript. They match what Telegram shows, so a
 # hand-saved chat export and the bot's own log are the same document.
@@ -207,7 +208,7 @@ async def run_turn(update: Update, context: ContextTypes.DEFAULT_TYPE, player_te
             chat_id, campaign.campaign_dir(chat_id),
             prompts.build_system_prompt(
                 prompts.onboarding_summary(party["party"]),
-                MODULE_DIR, campaign.campaign_dir(chat_id)),
+                MODULE_DIR, campaign.campaign_dir(chat_id), BACKEND),
         )
     async with typing(context, chat_id):
         try:
@@ -367,7 +368,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await REGISTRY.open(
             chat_id, cdir,
             prompts.build_system_prompt(
-                prompts.onboarding_summary(saved["party"]), MODULE_DIR, cdir))
+                prompts.onboarding_summary(saved["party"]), MODULE_DIR, cdir,
+                BACKEND))
         await run_turn(update, context,
                        "Начинаем игру. Это первый ход первой сессии — открой "
                        "приключение сценой прибытия на остров.")
@@ -528,6 +530,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
 
+    log.info("DM engine:    %s", engine.describe())
     log.info("Module pack: %s", MODULE_DIR)
     log.info("Campaigns:   %s", campaign.CAMPAIGNS_DIR)
     log.info("Polling…")
