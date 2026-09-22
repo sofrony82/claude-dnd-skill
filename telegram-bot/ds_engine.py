@@ -44,6 +44,7 @@ from config import (
     DS_MODEL,
     DS_TEMPERATURE,
     HISTORY_TURNS,
+    SAVE_REMIND_TURNS,
 )
 from sandbox import Sandbox, tool_schemas
 
@@ -59,10 +60,30 @@ STUB_OVER = 2_000
 # this happened on 7 turns, all of them heavy combat rounds.
 NUDGE_LIMIT = 2
 
+# The nudge runs through the full tool loop, not a bare completion: the empty
+# turn is sometimes a model that still meant to roll (a death save, the damage
+# of a hit it already announced), and a nudge that discards its tool calls
+# turns that roll into silence or into invented dice.
 NUDGE = ("Ты не сказал игроку ничего. Опиши результат словами, обычной прозой "
          "по-русски: что произошло, что видит и слышит персонаж, чем кончился "
-         "раунд. Не вызывай инструменты — все нужные броски уже сделаны, их "
-         "результаты выше. Просто расскажи игроку, что случилось.")
+         "раунд. Если нужный бросок ещё не сделан — сделай его через roll_dice, "
+         "но закончи ход рассказом игроку.")
+
+# A reply cut off by the token limit ends mid-sentence in front of the player.
+# Ask for the rest, a bounded number of times, and glue it on.
+CONTINUE_LIMIT = 2
+
+CONTINUE = ("Твой ответ оборвался на полуслове. Продолжи ровно с места обрыва: "
+            "не повторяй уже написанное и не начинай заново.")
+
+# Appended to the player's message once the DM has gone SAVE_REMIND_TURNS turns
+# without writing state.md. It rides on a real turn rather than costing one of
+# its own, so the player waits a few seconds longer instead of a whole round.
+SAVE_REMINDER = ("[Служебно, игроку не показывать: состояние кампании не "
+                 "записывалось уже {n} ходов. Прежде чем отвечать, обнови "
+                 "state.md (сцена и локация, хиты, потраченные ячейки и ресурсы, "
+                 "добыча, квесты) и лист персонажа, затем веди ход как обычно. "
+                 "О сохранении в ответе не упоминай.]")
 
 # The model occasionally writes its own tool-call syntax into `content` instead
 # of returning a structured tool call — `<｜DSML｜ invoke name="roll_dice">…`.
@@ -95,6 +116,17 @@ def _strip_tool_markup(text):
     return cleaned.strip(), cleaned.strip() != text.strip()
 
 
+def _glue(head: str, tail: str) -> str:
+    """Join a reply that was cut off to its continuation.
+
+    Both halves arrive stripped, so the space at the cut is gone; put it back
+    unless the continuation opens with punctuation that belongs to the head.
+    """
+    if tail[:1] in ".,;:!?…»)":
+        return head + tail
+    return f"{head} {tail}"
+
+
 class DSSession:
     """A DeepSeek DM agent bound to one chat."""
 
@@ -113,6 +145,10 @@ class DSSession:
         self.client: AsyncOpenAI | None = None
         # Where each player turn starts in `history`, for whole-turn trimming.
         self._turn_marks: list = []
+        # Player turns since the DM last wrote state.md.
+        self.turns_unsaved = 0
+        # Completions left in the current player turn, nudges included.
+        self._steps_left = 0
 
     # ── lifecycle ────────────────────────────────────────────────────────
     async def start(self):
@@ -169,58 +205,14 @@ class DSSession:
                 await self.start()
 
             self._turn_marks.append(len(self.history))
-            self.history.append({"role": "user", "content": text})
+            self.history.append({"role": "user",
+                                 "content": self._with_save_reminder(text)})
             self._trim()
 
+            writes_before = len(self.sandbox.writes)
             narration, preamble = [], []
-
-            for step in range(DS_MAX_STEPS):
-                msg = await self._complete()
-
-                content = (msg.get("content") or "").strip()
-                calls = msg.get("tool_calls") or []
-
-                # Only `content` and `tool_calls` go back — `reasoning_content`
-                # is deliberately dropped here.
-                entry = {"role": "assistant", "content": msg.get("content") or ""}
-                if calls:
-                    entry["tool_calls"] = calls
-                self.history.append(entry)
-
-                if content:
-                    (preamble if calls else narration).append(content)
-
-                if not calls:
-                    break
-
-                for call in calls:
-                    fn = (call.get("function") or {})
-                    name = fn.get("name") or "?"
-                    raw = fn.get("arguments") or "{}"
-                    try:
-                        args = json.loads(raw) if isinstance(raw, str) else (raw or {})
-                    except json.JSONDecodeError:
-                        args = {}
-                        result = ("ОШИБКА: аргументы не разобраны как JSON. "
-                                  "Повтори вызов с корректным JSON.")
-                    else:
-                        if on_progress is not None:
-                            with_label = args.get("label") or args.get("path") \
-                                or args.get("pattern") or args.get("notation") or ""
-                            try:
-                                await on_progress(f"{name} {with_label}".strip())
-                            except Exception:       # noqa: BLE001 — cosmetic only
-                                pass
-                        result = await asyncio.to_thread(self.sandbox.run, name, args)
-
-                    self.history.append({
-                        "role": "tool",
-                        "tool_call_id": call.get("id") or f"call_{step}",
-                        "content": str(result),
-                    })
-            else:
-                log.warning("chat %s: hit the %s-step ceiling in one turn",
-                            self.chat_id, DS_MAX_STEPS)
+            self._steps_left = DS_MAX_STEPS
+            await self._run(narration, preamble, on_progress)
 
             # A turn with no narration is a lost turn: the player acted and the
             # world said nothing back. It happens when the model spends the
@@ -228,17 +220,17 @@ class DSSession:
             # and it is far more common in heavy combat than anywhere else. Ask
             # again rather than hand the player silence.
             for attempt in range(NUDGE_LIMIT):
-                if any(c.strip() for c in narration):
+                if any(c.strip() for c in narration) or self._steps_left <= 0:
                     break
                 log.warning("chat %s: empty narration, nudging (%s/%s)",
                             self.chat_id, attempt + 1, NUDGE_LIMIT)
                 self.history.append({"role": "user", "content": NUDGE})
-                msg = await self._complete()
-                text = (msg.get("content") or "").strip()
-                self.history.append({"role": "assistant",
-                                     "content": msg.get("content") or ""})
-                if text:
-                    narration.append(text)
+                await self._run(narration, preamble, on_progress)
+
+            if "state.md" in self.sandbox.writes[writes_before:]:
+                self.turns_unsaved = 0
+            else:
+                self.turns_unsaved += 1
 
             self.turns += 1
             spoken = [c for c in narration if c.strip()] or \
@@ -249,15 +241,96 @@ class DSSession:
                           self.chat_id, NUDGE_LIMIT)
             return out
 
+    def _with_save_reminder(self, text: str) -> str:
+        if SAVE_REMIND_TURNS <= 0 or self.turns_unsaved < SAVE_REMIND_TURNS:
+            return text
+        log.info("chat %s: state.md unsaved for %s turns, reminding the DM",
+                 self.chat_id, self.turns_unsaved)
+        return f"{text}\n\n{SAVE_REMINDER.format(n=self.turns_unsaved)}"
+
+    async def _run(self, narration: list, preamble: list, on_progress=None):
+        """The tool loop: complete, run the calls, repeat until the DM speaks.
+
+        Spends `self._steps_left`, which is shared by the first pass and any
+        nudges so one turn cannot multiply its ceiling by retrying.
+        """
+        glue = False          # next narration continues a reply cut mid-sentence
+        continues = 0
+        while self._steps_left > 0:
+            self._steps_left -= 1
+            msg = await self._complete()
+
+            content = (msg.get("content") or "").strip()
+            calls = msg.get("tool_calls") or []
+
+            # Only `content` and `tool_calls` go back — `reasoning_content`
+            # is deliberately dropped here.
+            entry = {"role": "assistant", "content": msg.get("content") or ""}
+            if calls:
+                entry["tool_calls"] = calls
+            self.history.append(entry)
+
+            if content:
+                if calls:
+                    preamble.append(content)
+                elif glue and narration:
+                    narration[-1] = _glue(narration[-1], content)
+                else:
+                    narration.append(content)
+            glue = False
+
+            if not calls:
+                if msg.get("finish_reason") == "length" and continues < CONTINUE_LIMIT:
+                    continues += 1
+                    log.warning("chat %s: reply cut by the token limit, asking to "
+                                "continue (%s/%s)", self.chat_id, continues,
+                                CONTINUE_LIMIT)
+                    self.history.append({"role": "user", "content": CONTINUE})
+                    glue = bool(content)
+                    continue
+                return
+
+            for call in calls:
+                fn = (call.get("function") or {})
+                name = fn.get("name") or "?"
+                raw = fn.get("arguments") or "{}"
+                try:
+                    args = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                except json.JSONDecodeError:
+                    args = {}
+                    result = ("ОШИБКА: аргументы не разобраны как JSON. "
+                              "Повтори вызов с корректным JSON.")
+                else:
+                    if on_progress is not None:
+                        with_label = args.get("label") or args.get("path") \
+                            or args.get("pattern") or args.get("notation") or ""
+                        try:
+                            await on_progress(f"{name} {with_label}".strip())
+                        except Exception:       # noqa: BLE001 — cosmetic only
+                            pass
+                    result = await asyncio.to_thread(self.sandbox.run, name, args)
+
+                self.history.append({
+                    "role": "tool",
+                    "tool_call_id": call.get("id") or f"call_{len(self.history)}",
+                    "content": str(result),
+                })
+        else:
+            log.warning("chat %s: hit the %s-step ceiling in one turn",
+                        self.chat_id, DS_MAX_STEPS)
+
     async def _complete(self) -> dict:
         """One chat completion, normalised to a plain dict."""
+        kwargs = {}
+        if DS_MAX_TOKENS > 0:
+            kwargs["max_tokens"] = DS_MAX_TOKENS
         resp = await self.client.chat.completions.create(
             model=DS_MODEL,
             messages=self._messages(),
             tools=self.tools,
             tool_choice="auto",
             temperature=DS_TEMPERATURE,
-            max_tokens=DS_MAX_TOKENS,
+            **kwargs,
         )
         usage = getattr(resp, "usage", None)
         if usage is not None:
@@ -265,6 +338,20 @@ class DSSession:
 
         choice = resp.choices[0]
         m = choice.message
+        # One line per completion. When a turn goes wrong, this is what tells
+        # "cut by the limit" from "chose to say nothing" from "spent it all
+        # reasoning" — the three look identical from the chat.
+        details = getattr(usage, "completion_tokens_details", None)
+        log.info("chat %s: completion finish=%s tools=%d content=%d chars "
+                 "tokens prompt=%s completion=%s reasoning=%s",
+                 self.chat_id, choice.finish_reason, len(m.tool_calls or []),
+                 len(m.content or ""),
+                 getattr(usage, "prompt_tokens", None),
+                 getattr(usage, "completion_tokens", None),
+                 getattr(details, "reasoning_tokens", None))
+        if choice.finish_reason not in ("stop", "tool_calls", None):
+            log.warning("chat %s: completion ended with finish_reason=%s",
+                        self.chat_id, choice.finish_reason)
         calls = []
         for c in (m.tool_calls or []):
             calls.append({

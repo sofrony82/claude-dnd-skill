@@ -186,9 +186,10 @@ arithmetic is shown. Maps arrive as pictures when you first reach a location.
 | `NB_BASE_URL` | `https://api.tokenfactory.nebius.com/v1` | OpenAI-compatible endpoint |
 | `DND_DS_MODEL` | `deepseek-ai/DeepSeek-V4.1-Flash` | |
 | `DND_DS_TEMPERATURE` | `0.8` | prose warmth; below ~0.5 the DM repeats itself |
-| `DND_DS_MAX_TOKENS` | `3000` | cap on one reply |
+| `DND_DS_MAX_TOKENS` | `0` | cap on one reply, reasoning included; `0` = no cap |
 | `DND_DS_MAX_STEPS` | `24` | tool calls allowed within one player turn |
 | `DND_HISTORY_TURNS` | `12` | player turns kept verbatim before trimming |
+| `DND_SAVE_REMIND_TURNS` | `4` | player turns without a `state.md` write before the DM is told to save |
 
 ## Security
 

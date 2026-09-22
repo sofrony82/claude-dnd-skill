@@ -107,7 +107,10 @@ DS_MODEL = os.environ.get("DND_DS_MODEL", "deepseek-ai/DeepSeek-V4.1-Flash")
 # Warm prose, not code: DeepSeek's own guidance puts creative writing near 1.0,
 # and at 0.2 the DM repeats sentence shapes within a single scene.
 DS_TEMPERATURE = float(os.environ.get("DND_DS_TEMPERATURE", "0.8"))
-DS_MAX_TOKENS = int(os.environ.get("DND_DS_MAX_TOKENS", "3000"))
+# Cap on one completion; 0 means no cap and the model stops when it is done.
+# A cap counts reasoning tokens too, and a combat round that reasons long gets
+# cut mid-sentence — the narration the player sees simply stops.
+DS_MAX_TOKENS = int(os.environ.get("DND_DS_MAX_TOKENS", "0"))
 
 # Tool calls the DM may make inside ONE player turn before the loop gives up.
 # Opening a chapter legitimately costs a dozen: world, npcs, arc, the chapter
@@ -116,6 +119,11 @@ DS_MAX_STEPS = int(os.environ.get("DND_DS_MAX_STEPS", "24"))
 
 # Player turns kept verbatim before the window is trimmed on a turn boundary.
 HISTORY_TURNS = int(os.environ.get("DND_HISTORY_TURNS", "12"))
+
+# Player turns the DM may go without writing state.md before the loop reminds
+# it. The prompt asks for saves at scene boundaries; left alone, the model skips
+# them for a whole session and a restart loses everything since the opening.
+SAVE_REMIND_TURNS = int(os.environ.get("DND_SAVE_REMIND_TURNS", "4"))
 
 
 def _nebius_key() -> str:

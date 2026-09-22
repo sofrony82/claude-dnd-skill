@@ -445,7 +445,126 @@ class NarrationHygieneTests(unittest.TestCase):
     def test_a_lost_turn_gets_retried(self):
         """An empty turn costs the player their action, so the loop nudges."""
         self.assertGreaterEqual(self.ds.NUDGE_LIMIT, 1)
-        self.assertIn("Не вызывай инструменты", self.ds.NUDGE)
+        self.assertIn("roll_dice", self.ds.NUDGE)
+
+    def test_cut_reply_is_glued_with_a_space(self):
+        self.assertEqual(self.ds._glue("Она заносит", "кость."), "Она заносит кость.")
+        self.assertEqual(self.ds._glue("Кость", ", и всё"), "Кость, и всё")
+
+
+def _msg(content="", calls=(), finish="stop"):
+    return {"content": content, "finish_reason": finish, "markup_leak": False,
+            "tool_calls": [{"id": f"c{i}", "type": "function",
+                            "function": {"name": n, "arguments": a}}
+                           for i, (n, a) in enumerate(calls)]}
+
+
+class DSLoopTests(unittest.TestCase):
+    """The DeepSeek turn loop against a scripted model.
+
+    Each case is a failure from the 2026-09-22 session in chat 401712068: a
+    nudge that dropped the model's tool calls, a reply that ended mid-word at
+    the token cap, and a whole session in which state.md was never written.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if importlib.util.find_spec("openai") is None:
+            raise unittest.SkipTest("openai not installed in this interpreter")
+        _import("config")
+        cls.ds = _import("ds_engine")
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.s = self.ds.DSSession(1, pathlib.Path(self._tmp.name), "system")
+        self.s.client = object()          # never used: _complete is scripted
+
+    def script(self, *replies):
+        queue = list(replies)
+        seen = []
+
+        async def fake():
+            seen.append([dict(m) for m in self.s.history])
+            return queue.pop(0)
+
+        self.s._complete = fake
+        return seen
+
+    def ask(self, text="ход"):
+        import asyncio
+        return asyncio.run(self.s.ask(text))
+
+    def test_nudge_runs_the_tool_calls_it_gets(self):
+        self.script(_msg(""),
+                    _msg("", calls=[("roll_dice", '{"notation": "d20"}')]),
+                    _msg("Ты бросаешь спасбросок от смерти."))
+        out = self.ask()
+        self.assertEqual(out, "Ты бросаешь спасбросок от смерти.")
+        self.assertEqual(len(self.s.sandbox.rolls), 1, "the nudge's roll was dropped")
+        roles = [m["role"] for m in self.s.history]
+        self.assertIn("tool", roles)
+
+    def test_reply_cut_by_the_limit_is_continued(self):
+        seen = self.script(_msg("Она нависает над тобой. Кость", finish="length"),
+                           _msg("опускается на доски рядом с головой."))
+        out = self.ask()
+        self.assertEqual(out, "Она нависает над тобой. Кость опускается на доски "
+                              "рядом с головой.")
+        self.assertEqual(seen[1][-1]["content"], self.ds.CONTINUE)
+
+    def test_continuation_is_bounded(self):
+        cut = [_msg("часть", finish="length")] * (self.ds.CONTINUE_LIMIT + 1)
+        self.script(*cut)
+        out = self.ask()
+        self.assertEqual(out, " ".join(["часть"] * (self.ds.CONTINUE_LIMIT + 1)))
+
+    def test_state_reminder_after_unsaved_turns(self):
+        n = self.ds.SAVE_REMIND_TURNS
+        if n <= 0:
+            self.skipTest("reminder disabled by DND_SAVE_REMIND_TURNS")
+        self.script(*[_msg("сцена")] * (n + 1))
+        for _ in range(n):
+            self.ask()
+        self.assertEqual(self.s.turns_unsaved, n)
+        self.ask("иду дальше")
+        last_player = [m for m in self.s.history if m["role"] == "user"][-1]
+        self.assertIn("state.md", last_player["content"])
+        self.assertTrue(last_player["content"].startswith("иду дальше"))
+
+    def test_writing_state_resets_the_counter(self):
+        self.script(_msg("сцена"),
+                    _msg("", calls=[("write_file",
+                                     '{"path": "state.md", "content": "x"}')]),
+                    _msg("Записал."))
+        self.ask()
+        self.assertEqual(self.s.turns_unsaved, 1)
+        self.ask()
+        self.assertEqual(self.s.turns_unsaved, 0)
+        self.assertEqual(self.s.sandbox.writes, ["state.md"])
+
+    def test_no_token_cap_by_default(self):
+        """Uncapped unless configured: the cap counts reasoning and cuts prose."""
+        import asyncio
+        from types import SimpleNamespace as NS
+        captured = {}
+
+        async def create(**kw):
+            captured.update(kw)
+            return NS(usage=NS(total_tokens=5, prompt_tokens=3, completion_tokens=2,
+                               completion_tokens_details=NS(reasoning_tokens=1)),
+                      choices=[NS(finish_reason="stop",
+                                  message=NS(content="ok", tool_calls=None))])
+
+        self.s.client = NS(chat=NS(completions=NS(create=create)))
+        with self.assertLogs("dm.ds", level="INFO") as logs:
+            msg = asyncio.run(self.s._complete())
+        self.assertEqual(msg["finish_reason"], "stop")
+        if self.ds.DS_MAX_TOKENS <= 0:
+            self.assertNotIn("max_tokens", captured)
+        self.assertTrue(any("finish=stop" in line and "reasoning=1" in line
+                            for line in logs.output))
 
 
 if __name__ == "__main__":

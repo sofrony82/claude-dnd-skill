@@ -213,6 +213,15 @@ A turn in flight shows up as model calls in the API log:
 journalctl --user -u dnd-api --since -5min | grep chat/completions | tail
 ```
 
+Every completion also logs one line with how it ended and what it cost —
+`finish=stop` (spoke), `tool_calls` (rolled or read), `length` (cut by the
+token limit), with prompt, completion and reasoning tokens. When a turn went
+wrong, this is what tells the causes apart:
+
+```bash
+journalctl --user -u dnd-bot --since -30min | grep "chat <id>: completion"
+```
+
 ---
 
 ## Troubleshooting
@@ -254,7 +263,9 @@ a service running as a different user than the one you copied the pack for.
 | English text in the middle of a scene | reasoning or a tool-call preamble leaking into narration | `ds_engine.py` drops `reasoning_content` and treats text beside a tool call as preamble — check that logic first |
 | File paths or `read_file` in the prose | prompt's "don't show the player" rules losing to a long context | trim history (`DND_HISTORY_TURNS`), or restate the rule in `prompts.py` |
 | DM forgot the last scene | history was trimmed, or the process restarted | it is in the files, not the conversation: ask it to re-read `state.md`, and `/save` at scene boundaries |
-| **«Мастер промолчал»** — the turn produced nothing | the model spent the whole reply reasoning, or wrote tool syntax where prose belongs. Concentrated in heavy combat | `ds_engine.py` nudges up to `NUDGE_LIMIT` times; `grep "empty narration, nudging" ` the journal. If it still happens, the round is too complex — say so in the prompt and split it |
+| **«Мастер промолчал»** — the turn produced nothing | the model spent the whole reply reasoning, or wrote tool syntax where prose belongs. Concentrated in heavy combat | `ds_engine.py` nudges up to `NUDGE_LIMIT` times through the full tool loop, so a roll the model still owed gets made; `grep "empty narration, nudging" ` the journal. If it still happens, the round is too complex — say so in the prompt and split it |
+| Narration stops mid-sentence | the completion hit `max_tokens`, which counts reasoning too | `finish=length` in the journal. The default is no cap (`DND_DS_MAX_TOKENS=0`); if one is set, the loop asks the model to continue up to `CONTINUE_LIMIT` times |
+| `state.md` stale after a long session | the DM skipped scene-boundary saves | after `DND_SAVE_REMIND_TURNS` turns without a write the loop appends a hidden save reminder to the player's message; `grep "unsaved for"` the journal |
 | `<｜DSML｜ …>` or `<tool_call>` in the prose | the model wrote its own tool-call markup into `content` instead of returning a structured call | stripped by `_strip_tool_markup`; seeing it means the pattern needs widening |
 | DM invents module content | it answered without reading the chapter | `tool_calls` should be non-empty on a scene opening; check `read_file` is not silently refusing |
 | Maps never appear | the DM did not emit `[[map:N]]`, or the image is missing | `/map 1` forces it; `ls modules/*/maps/` |

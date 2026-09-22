@@ -228,6 +228,9 @@ class Sandbox:
         # Every roll the DM made this session, so a test can prove the dice
         # came from the script and were not invented in prose.
         self.rolls: list = []
+        # Campaign-relative paths of every successful write, so the loop can
+        # tell whether the DM is actually keeping state.md current.
+        self.writes: list = []
 
     # ── path resolution ──────────────────────────────────────────────────
     def _resolve(self, raw: str) -> pathlib.Path:
@@ -258,6 +261,13 @@ class Sandbox:
             # A tool that raises would end the turn. A tool that reports its
             # failure lets the DM try something else and keep the scene alive.
             return f"ОШИБКА {type(e).__name__}: {e}"
+
+    def _record_write(self, p: pathlib.Path):
+        try:
+            self.writes.append(p.resolve().relative_to(
+                self.campaign_dir.resolve()).as_posix())
+        except ValueError:
+            self.writes.append(p.name)
 
     # ── tools ────────────────────────────────────────────────────────────
     def _t_read_file(self, a: dict) -> str:
@@ -302,6 +312,7 @@ class Sandbox:
         content = a.get("content", "")
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
+        self._record_write(p)
         return f"Записано: {p.name} ({len(content)} знаков)"
 
     def _t_edit_file(self, a: dict) -> str:
@@ -324,6 +335,7 @@ class Sandbox:
             return (f"ОШИБКА: old_text встречается {n} раз — правка неоднозначна. "
                     "Возьми фрагмент подлиннее, чтобы он был уникален.")
         p.write_text(text.replace(old, new, 1), encoding="utf-8")
+        self._record_write(p)
         return f"Изменено: {p.name}"
 
     def _t_glob_files(self, a: dict) -> str:
