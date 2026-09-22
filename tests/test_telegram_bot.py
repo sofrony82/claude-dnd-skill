@@ -892,3 +892,140 @@ class DSLoopTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ChatLaneTests(unittest.TestCase):
+    """Chats run side by side; one chat's updates run in order, and not too many.
+
+    Before lanes, python-telegram-bot ran every update of every chat one after
+    another, so one player's minute-long DM turn stalled everybody else.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if importlib.util.find_spec("telegram") is None:
+            raise unittest.SkipTest("python-telegram-bot not installed in this interpreter")
+        cls.lanes = _import("chat_lanes")
+
+    @staticmethod
+    def upd(chat_id):
+        from types import SimpleNamespace
+        return SimpleNamespace(effective_chat=SimpleNamespace(id=chat_id))
+
+    def test_other_chats_are_not_blocked_by_a_long_turn(self):
+        import asyncio
+
+        async def go():
+            lanes = self.lanes.ChatLanes()
+            release, done = asyncio.Event(), []
+
+            async def long_turn():
+                await release.wait()
+                done.append("A")
+
+            async def quick():
+                done.append("B")
+
+            a = asyncio.create_task(lanes.process_update(self.upd(1), long_turn()))
+            await asyncio.sleep(0)
+            await asyncio.wait_for(lanes.process_update(self.upd(2), quick()), 1)
+            self.assertEqual(done, ["B"])
+            self.assertTrue(lanes.busy(1))
+            release.set()
+            await a
+            self.assertEqual(done, ["B", "A"])
+            self.assertFalse(lanes.busy(1))
+            self.assertEqual(lanes._locks, {})
+
+        asyncio.run(go())
+
+    def test_one_chat_runs_in_order_without_overlap(self):
+        import asyncio
+
+        async def go():
+            lanes = self.lanes.ChatLanes()
+            log, running = [], [0]
+
+            async def step(n):
+                running[0] += 1
+                self.assertEqual(running[0], 1, "two updates of one chat overlapped")
+                await asyncio.sleep(0.01)
+                log.append(n)
+                running[0] -= 1
+
+            await asyncio.gather(*(lanes.process_update(self.upd(7), step(n))
+                                   for n in range(3)))
+            self.assertEqual(log, [0, 1, 2])
+
+        asyncio.run(go())
+
+    def test_a_full_lane_refuses_instead_of_queueing(self):
+        import asyncio
+
+        async def go():
+            lanes = self.lanes.ChatLanes(max_queued=2)
+            release, ran = asyncio.Event(), []
+
+            async def turn(n):
+                await release.wait()
+                ran.append(n)
+
+            tasks = [asyncio.create_task(lanes.process_update(self.upd(5), turn(n)))
+                     for n in range(4)]
+            await asyncio.sleep(0.01)
+            release.set()
+            await asyncio.gather(*tasks)
+            self.assertEqual(ran, [0, 1])
+
+        asyncio.run(go())
+
+    def test_updates_without_a_chat_pass_straight_through(self):
+        import asyncio
+        from types import SimpleNamespace
+
+        async def go():
+            ran = []
+
+            async def work():
+                ran.append(1)
+
+            await self.lanes.ChatLanes().process_update(
+                SimpleNamespace(effective_chat=None), work())
+            self.assertEqual(ran, [1])
+
+        asyncio.run(go())
+
+
+class IdleSessionTests(unittest.TestCase):
+    """Which sessions the idle sweep may close."""
+
+    @classmethod
+    def setUpClass(cls):
+        if importlib.util.find_spec("openai") is None:
+            raise unittest.SkipTest("openai not installed in this interpreter")
+        _import("config")
+        cls.ds = _import("ds_engine")
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.reg = self.ds.DSRegistry()
+        for cid in (1, 2):
+            self.reg._sessions[cid] = self.ds.DSSession(
+                cid, pathlib.Path(self._tmp.name), "system")
+
+    def test_only_sessions_past_the_limit_are_idle(self):
+        self.reg._sessions[1].last_used -= 3600
+        self.assertEqual(self.reg.idle(1800), [1])
+
+    def test_a_session_mid_turn_is_never_idle(self):
+        import asyncio
+
+        async def go():
+            s = self.reg._sessions[1]
+            s.last_used -= 3600
+            async with s.lock:
+                self.assertEqual(self.reg.idle(1800), [])
+
+        asyncio.run(go())

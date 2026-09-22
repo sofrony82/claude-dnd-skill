@@ -10,6 +10,10 @@ A player may keep several campaigns: /games lists them and switches the chat
 between them, /new starts another without touching the rest, and deleting one
 moves it to the trash rather than erasing it (see campaign.py).
 
+Several players at once: updates from different chats run concurrently, a
+chat's own updates run in order (chat_lanes.py). Only private chats are
+served; the bot leaves any group it is added to.
+
 Run:  python3 bot.py      (see README.md)
 """
 
@@ -34,6 +38,7 @@ from telegram import (
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
+    ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -41,12 +46,14 @@ from telegram.ext import (
 )
 
 import campaign
+import chat_lanes
 import prompts
 import tg_format
 import transcript
 from config import (
     ALLOWED_USERS,
     BACKEND,
+    IDLE_CLOSE_MINUTES,
     MAX_PARTY,
     MIN_PARTY,
     MODULE_DIR,
@@ -62,6 +69,10 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("bot")
 
 REGISTRY = engine.new_registry()
+LANES = chat_lanes.ChatLanes()
+
+# How often the idle-session sweep looks around.
+SWEEP_EVERY = 300
 
 # Names used in the written transcript. They match what Telegram shows, so a
 # hand-saved chat export and the bot's own log are the same document.
@@ -151,6 +162,49 @@ async def deny(update: Update):
     await update.effective_message.reply_text(
         "Этот бот приватный. Попроси владельца добавить твой Telegram ID."
     )
+
+
+GROUP_TEXT = ("Я вожу игру только в личных сообщениях — напиши мне напрямую. "
+              "Из этого чата я выхожу.")
+
+
+async def leave_group(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """One player runs the whole party, so a group has no one to play for.
+
+    Group play would also mean several people steering one campaign and one
+    session, which nothing here is built for. Say so once and leave.
+    """
+    with contextlib.suppress(Exception):
+        await context.bot.send_message(chat_id, GROUP_TEXT)
+    with contextlib.suppress(Exception):
+        await context.bot.leave_chat(chat_id)
+    log.info("chat %s: not a private chat, left", chat_id)
+
+
+async def admitted(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """The gate every handler passes: a private chat with an allowed user."""
+    chat = update.effective_chat
+    if chat is None or chat.type != constants.ChatType.PRIVATE:
+        if update.callback_query is not None:
+            with contextlib.suppress(Exception):
+                await update.callback_query.answer()
+        if chat is not None:
+            await leave_group(context, chat.id)
+        return False
+    if not authorised(update):
+        await deny(update)
+        return False
+    return True
+
+
+async def on_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Leave a group or channel as soon as someone adds the bot to it."""
+    change = update.my_chat_member
+    if change is None or change.chat.type == constants.ChatType.PRIVATE:
+        return
+    if change.new_chat_member.status in (constants.ChatMemberStatus.MEMBER,
+                                         constants.ChatMemberStatus.ADMINISTRATOR):
+        await leave_group(context, change.chat.id)
 
 
 # ── output helpers ───────────────────────────────────────────────────────
@@ -245,11 +299,13 @@ async def run_turn(update: Update, context: ContextTypes.DEFAULT_TYPE, player_te
     async with typing(context, chat_id):
         try:
             reply = await session.ask(player_text)
-        except Exception as e:
+        except Exception:
+            # The details are for the log. A player has no use for an exception
+            # name, and its message can carry paths, URLs or a provider's error.
             log.exception("chat %s: DM turn failed", chat_id)
             await update.effective_message.reply_text(
-                f"Мастер поперхнулся: {type(e).__name__}: {e}\n"
-                "Попробуй повторить ход или /start заново.")
+                "Мастер поперхнулся — у меня что-то сломалось. "
+                "Попробуй повторить ход; если не выйдет, /start.")
             return
     if reply:
         await send_narration(update, context, reply)
@@ -309,8 +365,8 @@ def pregen_keyboard(taken):
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorised(update):
-        return await deny(update)
+    if not await admitted(update, context):
+        return
 
     ok, missing = campaign.pack_ready()
     if not ok:
@@ -389,8 +445,8 @@ def owns(update: Update, campaign_id: str) -> bool:
 
 
 async def cmd_games(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorised(update):
-        return await deny(update)
+    if not await admitted(update, context):
+        return
     text, kb = games_view(update.effective_user.id,
                           campaign.active_id(update.effective_chat.id))
     await update.effective_message.reply_text(
@@ -398,8 +454,8 @@ async def cmd_games(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorised(update):
-        return await deny(update)
+    if not await admitted(update, context):
+        return
     ok, missing = campaign.pack_ready()
     if not ok:
         await update.effective_message.reply_text(
@@ -410,8 +466,8 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_rename(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorised(update):
-        return await deny(update)
+    if not await admitted(update, context):
+        return
     cid = campaign.active_id(update.effective_chat.id)
     title = " ".join(context.args).strip()[:60] if context.args else ""
     if not cid:
@@ -455,10 +511,13 @@ async def trash_campaign(update: Update, cid: str) -> None:
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorised(update):
-        return await deny(update)
+    if not await admitted(update, context):
+        return
     q = update.callback_query
-    await q.answer()
+    # A press made during a long turn waits in the chat's lane, and Telegram
+    # refuses to answer a query that old. The press itself is still good.
+    with contextlib.suppress(Exception):
+        await q.answer()
     data = q.data or ""
 
     if data == "games":
@@ -539,8 +598,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorised(update):
-        return await deny(update)
+    if not await admitted(update, context):
+        return
     text = (update.effective_message.text or "").strip()
     if not text:
         return
@@ -604,14 +663,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── commands ─────────────────────────────────────────────────────────────
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorised(update):
-        return await deny(update)
+    if not await admitted(update, context):
+        return
     await update.effective_message.reply_text(HELP, parse_mode=constants.ParseMode.HTML)
 
 
 async def cmd_party(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorised(update):
-        return await deny(update)
+    if not await admitted(update, context):
+        return
     party = campaign.load_party(update.effective_chat.id)
     if not party:
         await update.effective_message.reply_text("Игра не начата. /start")
@@ -623,8 +682,8 @@ async def cmd_party(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorised(update):
-        return await deny(update)
+    if not await admitted(update, context):
+        return
     log_player(update)
     arg = " ".join(context.args).strip() if context.args else ""
     await run_turn(update, context,
@@ -636,8 +695,8 @@ async def cmd_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_map(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorised(update):
-        return await deny(update)
+    if not await admitted(update, context):
+        return
     log_player(update)
     if context.args and context.args[0].isdigit():
         await send_map(update, context, int(context.args[0]))
@@ -649,8 +708,8 @@ async def cmd_map(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorised(update):
-        return await deny(update)
+    if not await admitted(update, context):
+        return
     log_player(update)
     await run_turn(update, context,
                    "Сделай краткий пересказ: где отряд, что уже произошло, какие "
@@ -659,15 +718,15 @@ async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorised(update):
-        return await deny(update)
+    if not await admitted(update, context):
+        return
     log_player(update)
     await run_turn(update, context, SAVE_REQUEST)
 
 
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorised(update):
-        return await deny(update)
+    if not await admitted(update, context):
+        return
     if not campaign.exists(update.effective_chat.id):
         await update.effective_message.reply_text("Сейчас нет активной кампании. /games")
         return
@@ -716,9 +775,38 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
         log.warning("network hiccup (retrying): %s: %s", type(err).__name__, err)
         return
     log.exception("handler error", exc_info=err)
+    chat = getattr(update, "effective_chat", None)
+    if chat is not None and chat.type == constants.ChatType.PRIVATE:
+        with contextlib.suppress(Exception):
+            await context.bot.send_message(
+                chat.id, "Что-то пошло не так. Попробуй ещё раз или /start.")
+
+
+async def sweep_idle_sessions():
+    """Close DM sessions nobody has used for IDLE_CLOSE_MINUTES.
+
+    Safe because resuming does not need them: the next message reopens the
+    session from state.md and the raw-log tail. A chat with anything in its
+    lane is skipped, and `busy` and `close` run with no await between them, so
+    no handler can pick the session up in the gap.
+    """
+    idle = IDLE_CLOSE_MINUTES * 60
+    while True:
+        await asyncio.sleep(SWEEP_EVERY)
+        try:
+            for chat_id in REGISTRY.idle(idle):
+                if LANES.busy(chat_id):
+                    continue
+                await REGISTRY.close(chat_id)
+                log.info("chat %s: DM session idle for %s min, closed",
+                         chat_id, IDLE_CLOSE_MINUTES)
+        except Exception:                           # noqa: BLE001
+            log.exception("idle sweep failed")
 
 
 async def post_init(app: Application):
+    if IDLE_CLOSE_MINUTES > 0:
+        app.bot_data["sweeper"] = asyncio.create_task(sweep_idle_sessions())
     try:
         await app.bot.set_my_commands([BotCommand(c, d) for c, d in MENU])
     except Exception as e:                          # noqa: BLE001
@@ -726,6 +814,9 @@ async def post_init(app: Application):
 
 
 async def post_shutdown(app: Application):
+    sweeper = app.bot_data.get("sweeper")
+    if sweeper is not None:
+        sweeper.cancel()
     await REGISTRY.close_all()
 
 
@@ -741,6 +832,7 @@ def main():
 
     app = (Application.builder()
            .token(token())
+           .concurrent_updates(LANES)
            .post_init(post_init)
            .post_shutdown(post_shutdown)
            .build())
@@ -757,6 +849,7 @@ def main():
     app.add_handler(CommandHandler("save", cmd_save))
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CallbackQueryHandler(on_callback))
+    app.add_handler(ChatMemberHandler(on_membership, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
 

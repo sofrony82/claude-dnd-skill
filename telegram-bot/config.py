@@ -81,6 +81,11 @@ MAX_TURNS = int(os.environ.get("DND_MAX_TURNS", "40"))
 _allow = os.environ.get("TELEGRAM_ALLOWED_USERS", "").strip()
 ALLOWED_USERS = {int(x) for x in re.findall(r"-?\d+", _allow)} if _allow else set()
 
+# A DM session nobody has written to for this long is closed; the next message
+# reopens it from the campaign files and the raw-log tail. An idle SDK session
+# is a live subprocess, an idle DeepSeek one a history kept in memory.
+IDLE_CLOSE_MINUTES = int(os.environ.get("DND_IDLE_CLOSE_MINUTES", "30"))
+
 # ── Table rules ──────────────────────────────────────────────────────────
 MIN_PARTY, MAX_PARTY = 1, 5
 TELEGRAM_LIMIT = 4096          # hard cap per message

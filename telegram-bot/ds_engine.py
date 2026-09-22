@@ -32,6 +32,7 @@ import asyncio
 import json
 import logging
 import pathlib
+import time
 import re
 
 from openai import AsyncOpenAI
@@ -152,6 +153,8 @@ class DSSession:
         self.campaign_dir = pathlib.Path(campaign_dir)
         self.system_prompt = system_prompt
         self.lock = asyncio.Lock()
+        # When the chat last had this session do anything; see Registry.idle().
+        self.last_used = time.monotonic()
         self.turns = 0
         self.total_cost = 0.0          # kept for interface parity; Nebius bills elsewhere
         self.total_tokens = 0
@@ -218,6 +221,7 @@ class DSSession:
     async def ask(self, text: str, on_progress=None) -> str:
         """Send one player turn, return the DM's narration."""
         async with self.lock:
+            self.last_used = time.monotonic()
             if self.client is None:
                 await self.start()
 
@@ -403,6 +407,12 @@ class DSRegistry:
         await s.start()
         self._sessions[chat_id] = s
         return s
+
+    def idle(self, seconds: float) -> list:
+        """Chats whose session has not been used for `seconds` and is not mid-turn."""
+        now = time.monotonic()
+        return [cid for cid, s in self._sessions.items()
+                if now - s.last_used >= seconds and not s.lock.locked()]
 
     async def close(self, chat_id: int):
         s = self._sessions.pop(chat_id, None)

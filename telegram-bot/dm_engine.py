@@ -19,6 +19,7 @@ Anything else is denied with a reason the agent can read and work around.
 import asyncio
 import logging
 import pathlib
+import time
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -47,6 +48,8 @@ class DMSession:
         self.system_prompt = system_prompt
         self.client: ClaudeSDKClient | None = None
         self.lock = asyncio.Lock()
+        # When the chat last had this session do anything; see Registry.idle().
+        self.last_used = time.monotonic()
         self.turns = 0
         self.total_cost = 0.0
         # Maps already sent this session. The system prompt asks the DM to
@@ -133,6 +136,7 @@ class DMSession:
         a long turn instead of going silent.
         """
         async with self.lock:
+            self.last_used = time.monotonic()
             if self.client is None:
                 await self.start()
 
@@ -184,6 +188,12 @@ class SessionRegistry:
         await s.start()
         self._sessions[chat_id] = s
         return s
+
+    def idle(self, seconds: float) -> list:
+        """Chats whose session has not been used for `seconds` and is not mid-turn."""
+        now = time.monotonic()
+        return [cid for cid, s in self._sessions.items()
+                if now - s.last_used >= seconds and not s.lock.locked()]
 
     async def close(self, chat_id: int):
         s = self._sessions.pop(chat_id, None)

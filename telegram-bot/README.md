@@ -177,6 +177,14 @@ Everything else you type is your turn. Write freely, for the whole party
 Dice are rolled by `scripts/dice.py`, never imagined by the model, and the
 arithmetic is shown. Maps arrive as pictures when you first reach a location.
 
+Play is in a private chat only: one person runs the whole party, and the bot
+leaves any group or channel it is added to. Several players can play at once —
+each chat is its own lane (`chat_lanes.py`), so one player's long DM turn does
+not hold up anyone else. Within a chat, messages are handled in order; typing
+more than two while the DM is still answering gets a "wait" note instead of a
+queue of paid turns. A DM session nobody has used for `DND_IDLE_CLOSE_MINUTES`
+is closed; the next message reopens it from the files and the log.
+
 ## Configuration
 
 | Variable | Default | |
@@ -196,6 +204,7 @@ arithmetic is shown. Maps arrive as pictures when you first reach a location.
 | `DND_DS_MAX_STEPS` | `24` | tool calls allowed within one player turn |
 | `DND_HISTORY_TURNS` | `12` | player turns kept verbatim before trimming |
 | `DND_SAVE_REMIND_TURNS` | `4` | player turns without a `state.md` write before the DM is told to save |
+| `DND_IDLE_CLOSE_MINUTES` | `30` | close a DM session unused this long; `0` keeps them forever |
 
 ## Security
 

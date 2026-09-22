@@ -299,6 +299,10 @@ itself is slow; check the endpoint.
 To trade prose quality for speed on the Claude backend: `DND_MODEL=claude-sonnet-5`,
 `DND_EFFORT=low`.
 
+One player's turn never waits on another's: updates run concurrently across
+chats and in order within a chat (`chat_lanes.py`). A player who sees "⏳ Мастер
+ещё отвечает" typed ahead of the DM; `grep "lane full"` the journal.
+
 ### Context and cost
 
 One opening turn reads `world.md`, `npcs.md`, `arc.md` and a chapter — roughly
