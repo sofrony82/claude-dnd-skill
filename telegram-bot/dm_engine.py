@@ -33,8 +33,9 @@ from claude_agent_sdk import (
     ToolUseBlock,
 )
 
-from config import DATA_ROOT, DND_SKILL_DIR, EFFORT, MAX_TURNS, MODEL, MODULE_DIR
-from sandbox import ALLOWED_SCRIPTS, _under, bash_allowed, check_command  # noqa: F401
+from config import DND_SKILL_DIR, EFFORT, MAX_TURNS, MODEL, MODULE_DIR
+from sandbox import (  # noqa: F401 — ALLOWED_SCRIPTS is re-exported
+    ALLOWED_SCRIPTS, _under, bash_allowed, check_command, script_root)
 
 log = logging.getLogger("dm")
 
@@ -107,7 +108,7 @@ class DMSession:
             # CLAUDE.md from the host machine has no business at this table.
             setting_sources=[],
             env={
-                "DND_CAMPAIGN_ROOT": str(DATA_ROOT),
+                "DND_CAMPAIGN_ROOT": str(script_root(self.campaign_dir)),
                 "DND_DICE_PHYSICAL": "0",   # no phone dice server behind a bot
                 "CLAUDE_SKILL_DIR": str(DND_SKILL_DIR),
             },

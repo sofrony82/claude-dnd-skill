@@ -62,9 +62,11 @@ DATA_ROOT = pathlib.Path(
     os.environ.get("DND_CAMPAIGN_ROOT", "~/.claude/dnd")
 ).expanduser().resolve()
 MODULES_DIR = DATA_ROOT / "modules"
-CAMPAIGNS_DIR = DATA_ROOT / "campaigns"
-# chat id → the campaign that chat is playing (see campaign.py)
-CHATS_DIR = DATA_ROOT / "chats"
+# users/<user_id>/ holds everything one player owns (see campaign.py)
+USERS_DIR = DATA_ROOT / "users"
+# The flat layout before that, read only to migrate it.
+LEGACY_CAMPAIGNS_DIR = DATA_ROOT / "campaigns"
+LEGACY_CHATS_DIR = DATA_ROOT / "chats"
 
 MODULE_ID = os.environ.get("DND_MODULE", "stormwreck-isle")
 MODULE_DIR = MODULES_DIR / MODULE_ID

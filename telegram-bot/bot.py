@@ -438,10 +438,13 @@ def games_view(user_id: int, active):
 
 
 def owns(update: Update, campaign_id: str) -> bool:
-    """Callback data is client-supplied: check the id belongs to this user."""
+    """Callback data is client-supplied: check the id names one of this user's.
+
+    Lookups are under the user's own directory, so another player's id simply
+    is not there; this only turns "not there" into a clear answer.
+    """
     user = update.effective_user
-    return bool(user) and any(g["id"] == campaign_id
-                              for g in campaign.list_for(user.id))
+    return bool(user) and campaign.read_party(user.id, campaign_id) is not None
 
 
 async def cmd_games(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -477,7 +480,7 @@ async def cmd_rename(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(
             "Напиши новое название после команды: /rename Дилион на острове")
         return
-    campaign.rename(cid, title)
+    campaign.rename(update.effective_chat.id, cid, title)
     await update.effective_message.reply_text(
         f"Кампания теперь называется <b>{html.escape(title)}</b>.",
         parse_mode=constants.ParseMode.HTML)
@@ -494,7 +497,7 @@ async def switch_to(update: Update, context: ContextTypes.DEFAULT_TYPE, cid: str
     await REGISTRY.close(chat_id)
     campaign.set_active(chat_id, cid)
     context.chat_data.clear()
-    title = campaign.summary(cid)["title"]
+    title = campaign.summary(chat_id, cid)["title"]
     await q.edit_message_text(f"Переключаюсь на «{title}»…")
     await run_turn(update, context,
                    "Игрок вернулся к игре. Кратко напомни, где отряд "
@@ -506,7 +509,7 @@ async def trash_campaign(update: Update, cid: str) -> None:
     if cid == campaign.active_id(chat_id):
         await REGISTRY.close(chat_id)
         campaign.set_active(chat_id, None)
-    where = campaign.trash(cid)
+    where = campaign.trash(chat_id, cid)
     log.info("chat %s: campaign %s moved to %s", chat_id, cid, where)
 
 
@@ -535,7 +538,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if action == "sw":
             await switch_to(update, context, cid)
         elif action == "rm":
-            title = campaign.summary(cid)["title"]
+            title = campaign.summary(update.effective_chat.id, cid)["title"]
             kb = InlineKeyboardMarkup([[
                 InlineKeyboardButton("🗑 Да, в корзину", callback_data=f"rmy:{cid}"),
                 InlineKeyboardButton("↩️ Назад", callback_data="games"),
@@ -629,7 +632,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Party complete — build the campaign and open the table.
         context.chat_data[K_STAGE] = None
         chat_id = update.effective_chat.id
-        cdir = campaign.create(chat_id, party, owner=update.effective_user.id)
+        cdir = campaign.create(chat_id, party)
         roster = "\n".join(f"• <b>{html.escape(p['name'])}</b> — {p['race']} {p['klass']}"
                            for p in party)
         opening = ("Отряд собран:\n"
@@ -823,6 +826,8 @@ async def post_shutdown(app: Application):
 def main():
     _lock = acquire_single_instance_lock()  # noqa: F841 — held for process life
 
+    campaign.migrate_flat_layout()
+
     ok, missing = campaign.pack_ready()
     if not ok:
         print(f"⚠  Module pack {MODULE_DIR} is incomplete — missing: {', '.join(missing)}",
@@ -855,7 +860,7 @@ def main():
 
     log.info("DM engine:    %s", engine.describe())
     log.info("Module pack: %s", MODULE_DIR)
-    log.info("Campaigns:   %s", campaign.CAMPAIGNS_DIR)
+    log.info("Players:     %s", campaign.USERS_DIR)
     log.info("Polling…")
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 

@@ -23,7 +23,7 @@ The checks, and why each one is here:
   empty           The turn produced no narration at all.
 
 Usage:
-    python3 replay_log.py --log ~/.claude/dnd/campaigns/tg-401712068/raw-log.md \\
+    python3 replay_log.py --log ~/.claude/dnd/users/401712068/campaigns/tg-401712068/raw-log.md \\
                           --chat-id 991712068 --out /tmp/raw-log-deepseek.md
     python3 replay_log.py --log … --limit 8        # smoke test, first 8 turns
 """

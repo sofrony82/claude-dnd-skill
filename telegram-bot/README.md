@@ -25,7 +25,7 @@ HTTP ──▶ api_server.py┘                   ds_engine.py  (DeepSeek + sand
                     ├─ system prompt: DM standards + pack layout (prompts.py)
                     ├─ tools: read/write/edit/glob/grep + dice, allowlisted
                     ├─ reads:  ~/.claude/dnd/modules/stormwreck-isle/  (pack, read-only)
-                    └─ writes: ~/.claude/dnd/campaigns/tg-<chat_id>/   (state, sheets, log)
+                    └─ writes: ~/.claude/dnd/users/<user_id>/campaigns/<id>/  (state, sheets, log)
 ```
 
 > **Operating it?** [RUNBOOK.md](RUNBOOK.md) covers starting and stopping the
@@ -140,7 +140,7 @@ raw room codes, empty turns.
 
 ```bash
 .venv/bin/python replay_log.py \
-    --log ~/.claude/dnd/campaigns/tg-401712068/raw-log.md \
+    --log ~/.claude/dnd/users/401712068/campaigns/tg-401712068/raw-log.md \
     --chat-id 991712068 \
     --out /tmp/raw-log-deepseek.md --report /tmp/report.json
 .venv/bin/python replay_log.py --log … --limit 8      # smoke test
@@ -294,33 +294,42 @@ as possibly overlapping what `state.md` already holds.
 
 ## State on disk
 
+Everything a player owns sits under their own directory:
+
 ```
-~/.claude/dnd/campaigns/<campaign_id>/
-    party.json        who is at the table, owner, title
-    state.md          current scene, quests, world state
-    session-log.md    what happened
-    raw-log.md        verbatim transcript
-    .saved.json       how far into raw-log.md the last save reaches
-    characters/*.md   one sheet per character
-~/.claude/dnd/campaigns/.trash/<campaign_id>-<stamp>/
-                      campaigns deleted from the bot
-~/.claude/dnd/chats/<chat_id>.json
-                      {"active": "<campaign_id>"} — what the chat is playing
+~/.claude/dnd/users/<user_id>/
+    active.json                       {"active": "<campaign_id>"} — what they play
+    campaigns/<campaign_id>/
+        party.json        who is at the table, owner, title
+        state.md          current scene, quests, world state
+        session-log.md    what happened
+        raw-log.md        verbatim transcript
+        .saved.json       how far into raw-log.md the last save reaches
+        characters/*.md   one sheet per character
+    campaigns/.trash/<campaign_id>-<stamp>/
+                          campaigns deleted from the bot
 ```
 
-New campaigns are named `<date>-<first character>` (`20260922-merri`). Ones made
-before multi-campaign support are `tg-<chat_id>` with no owner field; they stay
-where they are and belong to the user in the `chat_id` their party.json records
-(a private chat's id is its user's id). So a backup copied back under any
-`tg-…` name shows up in that user's `/games` and can be resumed. The API
-server keeps using `tg-<chat_id>` for its test chats, and those never show in
-anyone's `/games`.
+The bot serves private chats only, where the chat id is the user id. The
+helper scripts run with `users/<user_id>/` as their data root, so no
+`--campaign` name can reach another player's files, and deleting a player's
+data is removing one directory.
+
+New campaigns are named `<date>-<first character>` (`20260922-merri`); older ones
+are `tg-<chat_id>`. The API server uses `tg-<chat_id>` for its test chats, under
+`users/<chat_id>/`, so they never show in a real player's `/games`.
+
+The earlier flat layout (`campaigns/<id>/`, `chats/<chat_id>.json`) is moved
+into place on startup by `campaign.migrate_flat_layout()`: each campaign goes to
+the `owner` in its party.json, or else the `chat_id` it recorded, or else the
+id in a `tg-<id>` name. Anything whose owner cannot be told is left where it
+was and logged.
 
 Deleting from the bot never erases: the directory moves to `.trash/`. To
 restore one, move it back and strip the stamp:
 
-    mv ~/.claude/dnd/campaigns/.trash/20260922-merri-20260922-174711 \
-       ~/.claude/dnd/campaigns/20260922-merri
+    cd ~/.claude/dnd/users/<user_id>/campaigns
+    mv .trash/20260922-merri-20260922-174711 20260922-merri
 
 Empty the trash by hand. The module pack is untouched by play, so several
 campaigns can run the same adventure independently.

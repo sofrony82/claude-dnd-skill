@@ -1,30 +1,35 @@
 """
-campaign.py — campaigns on disk, and which one each chat is playing.
+campaign.py — campaigns on disk, grouped by player, and which one is active.
 
 A campaign directory holds only what *changes* during play: the party's sheets,
 the world state, the log. The module pack stays where it is and is read in
 place — it is identical for every table and can run to megabytes, so copying it
 per chat would be waste with a consistency hazard attached.
 
-    ~/.claude/dnd/campaigns/<campaign_id>/
-        party.json          who is at the table, who owns it, its title
-        state.md            current scene, quests, world state
-        session-log.md      what happened, per session
-        raw-log.md          verbatim transcript
-        characters/*.md     one sheet per player character
-    ~/.claude/dnd/campaigns/.trash/<campaign_id>-<stamp>/
-                            deleted campaigns, kept until removed by hand
-    ~/.claude/dnd/chats/<chat_id>.json
-                            {"active": "<campaign_id>"} — what this chat plays
+    ~/.claude/dnd/users/<user_id>/
+        active.json                 {"active": "<campaign_id>"} — what they play
+        campaigns/<campaign_id>/
+            party.json              who is at the table, its title
+            state.md                current scene, quests, world state
+            session-log.md          what happened, per session
+            raw-log.md              verbatim transcript
+            characters/*.md         one sheet per player character
+        campaigns/.trash/<campaign_id>-<stamp>/
+                                    deleted campaigns, kept until removed by hand
 
-A player can keep several campaigns and switch between them; the chat only
-points at one. Campaigns made before this layout are named `tg-<chat_id>` and
-have no pointer or owner: a chat with no pointer falls back to its `tg-` dir,
-and in a private chat the chat id *is* the user id, so ownership is inferred
-from the `chat_id` recorded in party.json.
+Everything a player owns lives under their own directory, so ownership is where
+a campaign *is*, not a field to check; the helper scripts run with that
+directory as their data root and cannot name anyone else's campaign; and
+deleting a player's data is removing one directory. The bot serves private
+chats only, where the chat id is the user id, so the two are used
+interchangeably here.
+
+Campaigns from the earlier flat layout (`campaigns/<id>/`, `chats/<id>.json`)
+are moved into place by `migrate_flat_layout()` at startup.
 """
 
 import json
+import logging
 import pathlib
 import re
 import shutil
@@ -32,9 +37,16 @@ import unicodedata
 from datetime import date, datetime
 
 import transcript
-from config import CAMPAIGNS_DIR, CHATS_DIR, MODULE_DIR, PREGENS
+from config import (
+    LEGACY_CAMPAIGNS_DIR,
+    LEGACY_CHATS_DIR,
+    MODULE_DIR,
+    PREGENS,
+    USERS_DIR,
+)
 
-TRASH_DIR = CAMPAIGNS_DIR / ".trash"
+log = logging.getLogger("campaign")
+
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 
 _TRANSLIT = {
@@ -55,8 +67,21 @@ def slug(name: str) -> str:
     return s or "pc"
 
 
-# ── ids, paths, the per-chat pointer ─────────────────────────────────────
+# ── where a player's things live ─────────────────────────────────────────
+def user_dir(user_id: int) -> pathlib.Path:
+    return USERS_DIR / str(int(user_id))
+
+
+def campaigns_root(user_id: int) -> pathlib.Path:
+    return user_dir(user_id) / "campaigns"
+
+
+def trash_dir(user_id: int) -> pathlib.Path:
+    return campaigns_root(user_id) / ".trash"
+
+
 def legacy_id(chat_id: int) -> str:
+    """The fixed id the API server uses for its per-chat test campaign."""
     return f"tg-{chat_id}"
 
 
@@ -65,67 +90,67 @@ def valid_id(campaign_id: str) -> bool:
     return bool(campaign_id) and bool(_ID_RE.match(campaign_id))
 
 
-def path(campaign_id: str) -> pathlib.Path:
+def path(user_id: int, campaign_id: str) -> pathlib.Path:
     if not valid_id(campaign_id):
         raise ValueError(f"bad campaign id {campaign_id!r}")
-    return CAMPAIGNS_DIR / campaign_id
+    return campaigns_root(user_id) / campaign_id
 
 
-def _is_campaign(campaign_id: str) -> bool:
-    return valid_id(campaign_id) and (CAMPAIGNS_DIR / campaign_id / "party.json").is_file()
+def _is_campaign(user_id: int, campaign_id: str) -> bool:
+    return (valid_id(campaign_id)
+            and (campaigns_root(user_id) / campaign_id / "party.json").is_file())
 
 
-def _pointer(chat_id: int) -> pathlib.Path:
-    return CHATS_DIR / f"{chat_id}.json"
+def _pointer(user_id: int) -> pathlib.Path:
+    return user_dir(user_id) / "active.json"
 
 
-def active_id(chat_id: int):
-    """The campaign this chat is playing, or None.
+def active_id(user_id: int):
+    """The campaign this player is playing, or None.
 
-    An explicit pointer wins. With none — a chat from before pointers existed —
-    the chat's own `tg-<chat_id>` campaign is the active one if it is there.
     A pointer to a campaign that has since been trashed resolves to None.
     """
-    f = _pointer(chat_id)
-    if f.is_file():
-        try:
-            cid = json.loads(f.read_text(encoding="utf-8")).get("active")
-        except (ValueError, OSError):
-            cid = None
-        return cid if cid and _is_campaign(cid) else None
-    cid = legacy_id(chat_id)
-    return cid if _is_campaign(cid) else None
+    f = _pointer(user_id)
+    if not f.is_file():
+        return None
+    try:
+        cid = json.loads(f.read_text(encoding="utf-8")).get("active")
+    except (ValueError, OSError):
+        return None
+    return cid if cid and _is_campaign(user_id, cid) else None
 
 
-def set_active(chat_id: int, campaign_id) -> None:
-    """Point the chat at a campaign; None leaves it with nothing active."""
-    CHATS_DIR.mkdir(parents=True, exist_ok=True)
-    _pointer(chat_id).write_text(json.dumps({"active": campaign_id}), encoding="utf-8")
+def set_active(user_id: int, campaign_id) -> None:
+    """Point the player at a campaign; None leaves nothing active."""
+    user_dir(user_id).mkdir(parents=True, exist_ok=True)
+    _pointer(user_id).write_text(json.dumps({"active": campaign_id}), encoding="utf-8")
 
 
-def campaign_dir(chat_id: int) -> pathlib.Path:
-    """Directory of the chat's active campaign.
+def campaign_dir(user_id: int) -> pathlib.Path:
+    """Directory of the player's active campaign.
 
-    With nothing active this is still a path — the legacy one, which does not
-    exist — so callers that only log or test for existence need no branch.
+    With nothing active this is still a path — one that does not exist — so
+    callers that only log or test for existence need no branch.
     """
-    return CAMPAIGNS_DIR / (active_id(chat_id) or legacy_id(chat_id))
+    return campaigns_root(user_id) / (active_id(user_id) or legacy_id(user_id))
 
 
-def exists(chat_id: int) -> bool:
-    return active_id(chat_id) is not None
+def exists(user_id: int) -> bool:
+    return active_id(user_id) is not None
 
 
-def read_party(campaign_id: str):
-    f = CAMPAIGNS_DIR / campaign_id / "party.json"
-    if not valid_id(campaign_id) or not f.is_file():
+def read_party(user_id: int, campaign_id: str):
+    if not valid_id(campaign_id):
+        return None
+    f = campaigns_root(user_id) / campaign_id / "party.json"
+    if not f.is_file():
         return None
     return json.loads(f.read_text(encoding="utf-8"))
 
 
-def load_party(chat_id: int):
-    cid = active_id(chat_id)
-    return read_party(cid) if cid else None
+def load_party(user_id: int):
+    cid = active_id(user_id)
+    return read_party(user_id, cid) if cid else None
 
 
 def pregen_meta(pregen_id: str):
@@ -144,18 +169,18 @@ def available_pregens():
     return out
 
 
-def new_id(party: list) -> str:
+def new_id(user_id: int, party: list) -> str:
     """A readable, unused id: `<date>-<first character>`, suffixed on a clash."""
     name = slug(party[0]["name"])[:24].strip("-") if party else ""
     base = f"{date.today():%Y%m%d}-{name or 'party'}"
     cid, n = base, 2
-    while (CAMPAIGNS_DIR / cid).exists():
+    while (campaigns_root(user_id) / cid).exists():
         cid, n = f"{base}-{n}", n + 1
     return cid
 
 
-def create(chat_id: int, party: list, owner=None, campaign_id=None) -> pathlib.Path:
-    """Create a campaign and make it the chat's active one.
+def create(user_id: int, party: list, campaign_id=None) -> pathlib.Path:
+    """Create a campaign for the player and make it their active one.
 
     `party` is a list of {id, name, klass, race} chosen during onboarding.
     With no `campaign_id` a fresh one is minted and nothing existing is
@@ -163,8 +188,8 @@ def create(chat_id: int, party: list, owner=None, campaign_id=None) -> pathlib.P
     existing campaign of that id is replaced, which is what a test reset wants.
     Returns the campaign directory.
     """
-    cid = campaign_id or new_id(party)
-    cdir = path(cid)
+    cid = campaign_id or new_id(user_id, party)
+    cdir = path(user_id, cid)
     if cdir.exists():
         shutil.rmtree(cdir)
     (cdir / "characters").mkdir(parents=True)
@@ -182,7 +207,7 @@ def create(chat_id: int, party: list, owner=None, campaign_id=None) -> pathlib.P
                         "race": pc["race"], "slug": s})
 
     (cdir / "party.json").write_text(
-        json.dumps({"chat_id": chat_id, "owner": owner,
+        json.dumps({"owner": user_id,
                     "title": ", ".join(r["name"] for r in records),
                     "created": date.today().isoformat(),
                     "module": MODULE_DIR.name, "party": records},
@@ -211,23 +236,11 @@ def create(chat_id: int, party: list, owner=None, campaign_id=None) -> pathlib.P
         encoding="utf-8")
     # A fresh campaign is fully saved: nothing in the log is newer than state.
     transcript.mark_saved(cdir)
-    set_active(chat_id, cid)
+    set_active(user_id, cid)
     return cdir
 
 
 # ── several campaigns per player ─────────────────────────────────────────
-def owned_by(campaign_id: str, party: dict, user_id: int) -> bool:
-    owner = party.get("owner")
-    if owner is not None:
-        return owner == user_id
-    # Pre-ownership campaign: it recorded the chat it was played in, and in a
-    # private chat that is the user. Trust the record over the directory name —
-    # a campaign restored from a backup may sit under another `tg-` name.
-    if party.get("chat_id") is not None:
-        return party["chat_id"] == user_id
-    return campaign_id == legacy_id(user_id)
-
-
 def _location(cdir: pathlib.Path) -> str:
     f = cdir / "state.md"
     if not f.is_file():
@@ -237,12 +250,12 @@ def _location(cdir: pathlib.Path) -> str:
     return m.group(1).strip() if m else ""
 
 
-def summary(campaign_id: str):
+def summary(user_id: int, campaign_id: str):
     """What a campaign list shows: title, party, where they are, last played."""
-    party = read_party(campaign_id)
+    party = read_party(user_id, campaign_id)
     if not party:
         return None
-    cdir = CAMPAIGNS_DIR / campaign_id
+    cdir = campaigns_root(user_id) / campaign_id
     # Play touches the log and the state; party.json only changes on a rename,
     # which is not playing. It stands in only for a campaign never played.
     touched = [f.stat().st_mtime for f in (cdir / "raw-log.md", cdir / "state.md")
@@ -260,40 +273,109 @@ def summary(campaign_id: str):
 
 
 def list_for(user_id: int) -> list:
-    """The user's campaigns, most recently played first."""
-    out = []
-    if not CAMPAIGNS_DIR.is_dir():
-        return out
-    for d in CAMPAIGNS_DIR.iterdir():
-        if d.name.startswith(".") or not _is_campaign(d.name):
-            continue
-        party = read_party(d.name)
-        if party and owned_by(d.name, party, user_id):
-            out.append(summary(d.name))
+    """The player's campaigns, most recently played first."""
+    root = campaigns_root(user_id)
+    if not root.is_dir():
+        return []
+    out = [summary(user_id, d.name) for d in root.iterdir()
+           if not d.name.startswith(".") and _is_campaign(user_id, d.name)]
     out.sort(key=lambda s: s["last_played"] or datetime.min, reverse=True)
     return out
 
 
-def rename(campaign_id: str, title: str) -> None:
-    f = path(campaign_id) / "party.json"
+def rename(user_id: int, campaign_id: str, title: str) -> None:
+    f = path(user_id, campaign_id) / "party.json"
     party = json.loads(f.read_text(encoding="utf-8"))
     party["title"] = title
     f.write_text(json.dumps(party, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def trash(campaign_id: str):
-    """Move a campaign to `.trash/`. Returns where it went, or None.
+def trash(user_id: int, campaign_id: str):
+    """Move a campaign to the player's `.trash/`. Returns where it went, or None.
 
-    Nothing is erased: restoring is a `mv` back into campaigns/. Chats pointing
-    at it simply resolve to no active campaign.
+    Nothing is erased: restoring is a `mv` back into campaigns/. A pointer at
+    it simply resolves to no active campaign.
     """
-    src = path(campaign_id)
+    src = path(user_id, campaign_id)
     if not src.is_dir():
         return None
-    TRASH_DIR.mkdir(parents=True, exist_ok=True)
-    dst = TRASH_DIR / f"{campaign_id}-{datetime.now():%Y%m%d-%H%M%S}"
+    trash_dir(user_id).mkdir(parents=True, exist_ok=True)
+    dst = trash_dir(user_id) / f"{campaign_id}-{datetime.now():%Y%m%d-%H%M%S}"
     shutil.move(str(src), str(dst))
     return dst
+
+
+# ── the flat layout this replaced ────────────────────────────────────────
+def _flat_owner(cdir: pathlib.Path):
+    """Who a campaign from the flat layout belongs to, or None if unknowable.
+
+    party.json's `owner` if set; else the chat it was played in, which in a
+    private chat is the user; else the `tg-<chat_id>` directory name.
+    """
+    with_party = cdir / "party.json"
+    if with_party.is_file():
+        try:
+            party = json.loads(with_party.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            party = {}
+        for key in ("owner", "chat_id"):
+            if isinstance(party.get(key), int):
+                return party[key]
+    m = re.match(r"^tg-(-?\d+)(?:-\d{8}-\d{6})?$", cdir.name)
+    return int(m.group(1)) if m else None
+
+
+def _move(src: pathlib.Path, dst: pathlib.Path, moved: list) -> None:
+    if dst.exists():
+        log.warning("migrate: %s already exists, left %s where it is", dst, src)
+        return
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dst))
+        moved.append((src, dst))
+    except (OSError, shutil.Error) as e:
+        # Another process (bot and API server start together) may have got
+        # there first; the next start retries whatever is left.
+        log.warning("migrate: could not move %s: %s", src, e)
+
+
+def migrate_flat_layout() -> list:
+    """Move flat-layout campaigns, trash and pointers under users/<owner>/.
+
+    Idempotent and safe to run on every start: once the old directories are
+    empty it does nothing. A campaign whose owner cannot be told is left where
+    it is and logged. Returns the (src, dst) pairs it moved.
+    """
+    moved = []
+    old = LEGACY_CAMPAIGNS_DIR
+    if old.is_dir():
+        trash = old / ".trash"
+        for d in sorted(trash.iterdir()) if trash.is_dir() else []:
+            owner = _flat_owner(d)
+            if owner is None:
+                log.warning("migrate: owner of trashed %s unknown, left in place", d)
+                continue
+            _move(d, trash_dir(owner) / d.name, moved)
+        for d in sorted(old.iterdir()):
+            if d.name.startswith(".") or not d.is_dir():
+                continue
+            owner = _flat_owner(d)
+            if owner is None:
+                log.warning("migrate: owner of %s unknown, left in place", d)
+                continue
+            _move(d, campaigns_root(owner) / d.name, moved)
+    if LEGACY_CHATS_DIR.is_dir():
+        for f in sorted(LEGACY_CHATS_DIR.glob("*.json")):
+            if re.fullmatch(r"-?\d+", f.stem):
+                _move(f, _pointer(int(f.stem)), moved)
+    for d in (old / ".trash", old, LEGACY_CHATS_DIR):
+        try:
+            d.rmdir()               # only if empty — anything left stays visible
+        except OSError:
+            pass
+    for src, dst in moved:
+        log.info("migrate: %s -> %s", src, dst)
+    return moved
 
 
 def pack_ready() -> tuple:

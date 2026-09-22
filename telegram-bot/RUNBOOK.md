@@ -142,7 +142,7 @@ the VM rejects the connection after too many attempts.
 | `~/claude-dnd-skill/telegram-bot/.venv/` | virtualenv, `requirements-deepseek.txt` | no |
 | `~/claude-dnd-skill/telegram-bot/.env` | **secrets**, `chmod 600` | no — gitignored |
 | `~/.claude/dnd/modules/stormwreck-isle/` | module pack, 6.2 MB, 118 files | no — data, not code |
-| `~/.claude/dnd/campaigns/tg-<chat_id>/` | live campaigns: state, sheets, transcripts | no — data |
+| `~/.claude/dnd/users/<user_id>/` | each player's campaigns, trash and active pointer | no — data |
 | `~/.config/systemd/user/dnd-{bot,api}.service` | the two units | no |
 | `~/scenario-raw-log.md` | the recorded session the replay test reads | no |
 | `~/raw-log-deepseek.md`, `~/replay-report.json` | last replay's output | no |
@@ -449,7 +449,7 @@ read side by side and grades every reply.
 
 ```bash
 .venv/bin/python replay_log.py \
-    --log ~/.claude/dnd/campaigns/tg-401712068/raw-log.md \
+    --log ~/.claude/dnd/users/401712068/campaigns/tg-401712068/raw-log.md \
     --chat-id 991712068 \
     --out /tmp/raw-log-deepseek.md --report /tmp/report.json
 

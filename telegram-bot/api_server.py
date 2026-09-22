@@ -70,7 +70,7 @@ class PartyMember(BaseModel):
 
 
 class NewSession(BaseModel):
-    chat_id: int = Field(..., description="campaign namespace; dir is tg-<chat_id>")
+    chat_id: int = Field(..., description="player id; dir is users/<chat_id>/campaigns/tg-<chat_id>")
     party: list[PartyMember] = Field(..., min_length=1, max_length=5)
     reset: bool = Field(True, description="wipe an existing campaign for this id")
 
@@ -230,6 +230,12 @@ async def close_session(chat_id: int):
     """Close the agent session. Campaign files stay on disk."""
     await REGISTRY.close(chat_id)
     return {"chat_id": chat_id, "closed": True}
+
+
+@app.on_event("startup")
+async def _startup():
+    # The bot does this too; whichever starts first moves the files.
+    campaign.migrate_flat_layout()
 
 
 @app.on_event("shutdown")

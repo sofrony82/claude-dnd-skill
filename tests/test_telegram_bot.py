@@ -299,7 +299,7 @@ class CampaignTests(unittest.TestCase):
 
 
 class CampaignSwitchTests(unittest.TestCase):
-    """Several campaigns per player, one active per chat, deletion to trash."""
+    """Several campaigns per player, one active, deletion to trash."""
 
     USER = 401712068
 
@@ -309,27 +309,22 @@ class CampaignSwitchTests(unittest.TestCase):
         cls.c = _import("campaign")
 
     def setUp(self):
-        import json
         import tempfile
         self._tmp = tempfile.TemporaryDirectory()
         root = pathlib.Path(self._tmp.name)
         self._saved = {k: getattr(self.c, k) for k in
-                       ("CAMPAIGNS_DIR", "CHATS_DIR", "TRASH_DIR", "MODULE_DIR")}
-        self.c.CAMPAIGNS_DIR = root / "campaigns"
-        self.c.CHATS_DIR = root / "chats"
-        self.c.TRASH_DIR = self.c.CAMPAIGNS_DIR / ".trash"
+                       ("USERS_DIR", "LEGACY_CAMPAIGNS_DIR", "LEGACY_CHATS_DIR",
+                        "MODULE_DIR")}
+        self.c.USERS_DIR = root / "users"
+        self.c.LEGACY_CAMPAIGNS_DIR = root / "campaigns"
+        self.c.LEGACY_CHATS_DIR = root / "chats"
         self.c.MODULE_DIR = root / "module"
         self.c.MODULE_DIR.mkdir()
         (self.c.MODULE_DIR / "state-seed.md").write_text(
             "# Заготовка состояния\n\n*Стартовый срез для НОВОГО прохождения.*\n\n---\n\n"
             "## Current Situation\n- **Location:** Причал\n", encoding="utf-8")
-        # A campaign from before pointers and owners existed.
-        legacy = self.c.CAMPAIGNS_DIR / f"tg-{self.USER}"
-        (legacy / "characters").mkdir(parents=True)
-        (legacy / "party.json").write_text(json.dumps(
-            {"chat_id": self.USER, "party": [{"name": "Дилион", "klass": "Волшебник"}]},
-            ensure_ascii=False), encoding="utf-8")
-        (legacy / "state.md").write_text(
+        self.first = self.c.create(self.USER, self.party("Дилион")).name
+        (self.c.campaigns_root(self.USER) / self.first / "state.md").write_text(
             "## Current Situation\n- **Location:** Обломки «Розы Ветров»\n",
             encoding="utf-8")
 
@@ -342,57 +337,43 @@ class CampaignSwitchTests(unittest.TestCase):
         return [{"id": "cleric-dwarf", "name": name, "klass": "Жрец",
                  "race": "Холмовой дварф"}]
 
-    def test_legacy_campaign_is_active_without_a_pointer(self):
-        self.assertEqual(self.c.active_id(self.USER), f"tg-{self.USER}")
-        self.assertTrue(self.c.exists(self.USER))
-        self.assertEqual(self.c.load_party(self.USER)["party"][0]["name"], "Дилион")
-
-    def test_restored_campaign_under_another_name_is_listed(self):
-        # A backup copied back as tg-<other id>, but recorded in the user's chat.
-        import json
-        d = self.c.CAMPAIGNS_DIR / f"tg-{self.USER - 1}"
-        d.mkdir()
-        (d / "party.json").write_text(json.dumps(
-            {"chat_id": self.USER, "party": [{"name": "sofrony", "klass": "Волшебник"}]}),
-            encoding="utf-8")
-        ids = [g["id"] for g in self.c.list_for(self.USER)]
-        self.assertIn(d.name, ids)
-        self.c.set_active(self.USER, d.name)
-        self.assertEqual(self.c.load_party(self.USER)["party"][0]["name"], "sofrony")
+    def test_campaigns_live_under_the_player(self):
+        cdir = self.c.campaign_dir(self.USER)
+        self.assertEqual(cdir.parent, self.c.USERS_DIR / str(self.USER) / "campaigns")
+        self.assertEqual(self.c.read_party(self.USER, self.first)["owner"], self.USER)
 
     def test_new_campaign_leaves_the_old_one_and_becomes_active(self):
-        cdir = self.c.create(self.USER, self.party(), owner=self.USER)
+        cdir = self.c.create(self.USER, self.party())
         self.assertEqual(self.c.active_id(self.USER), cdir.name)
         self.assertTrue(cdir.name.endswith("-torin"))
-        self.assertTrue((self.c.CAMPAIGNS_DIR / f"tg-{self.USER}" / "party.json").is_file())
         ids = [g["id"] for g in self.c.list_for(self.USER)]
-        self.assertCountEqual(ids, [cdir.name, f"tg-{self.USER}"])
+        self.assertCountEqual(ids, [cdir.name, self.first])
 
     def test_switching_back_and_forth(self):
-        new = self.c.create(self.USER, self.party(), owner=self.USER).name
-        self.c.set_active(self.USER, f"tg-{self.USER}")
-        self.assertEqual(self.c.campaign_dir(self.USER).name, f"tg-{self.USER}")
+        new = self.c.create(self.USER, self.party()).name
+        self.c.set_active(self.USER, self.first)
+        self.assertEqual(self.c.campaign_dir(self.USER).name, self.first)
         self.c.set_active(self.USER, new)
         self.assertEqual(self.c.campaign_dir(self.USER).name, new)
 
     def test_ids_do_not_clash(self):
-        a = self.c.create(self.USER, self.party(), owner=self.USER).name
-        b = self.c.create(self.USER, self.party(), owner=self.USER).name
+        a = self.c.create(self.USER, self.party()).name
+        b = self.c.create(self.USER, self.party()).name
         self.assertNotEqual(a, b)
         self.assertEqual(b, a + "-2")
 
-    def test_list_shows_only_the_users_campaigns(self):
-        self.c.create(991700002, self.party("Тестомаг"), campaign_id="tg-991700002")
-        self.c.create(555, self.party("Чужой"), owner=555)
-        titles = [g["title"] for g in self.c.list_for(self.USER)]
-        self.assertEqual(titles, ["Дилион"])
+    def test_players_do_not_see_each_other(self):
+        theirs = self.c.create(555, self.party("Чужой")).name
+        self.assertEqual([g["title"] for g in self.c.list_for(self.USER)], ["Дилион"])
+        self.assertIsNone(self.c.read_party(self.USER, theirs))
+        self.assertIsNone(self.c.summary(self.USER, theirs))
 
     def test_list_is_most_recent_first_and_carries_location(self):
         import os
         import time
-        new = self.c.create(self.USER, self.party(), owner=self.USER)
+        new = self.c.create(self.USER, self.party())
         old = time.time() - 3600
-        for f in (self.c.CAMPAIGNS_DIR / f"tg-{self.USER}").iterdir():
+        for f in (self.c.campaigns_root(self.USER) / self.first).iterdir():
             os.utime(f, (old, old))
         games = self.c.list_for(self.USER)
         self.assertEqual(games[0]["id"], new.name)
@@ -400,17 +381,15 @@ class CampaignSwitchTests(unittest.TestCase):
         self.assertEqual(games[1]["location"], "Обломки «Розы Ветров»")
 
     def test_trash_moves_rather_than_erases(self):
-        cid = f"tg-{self.USER}"
-        dst = self.c.trash(cid)
+        dst = self.c.trash(self.USER, self.first)
         self.assertTrue((dst / "party.json").is_file())
-        self.assertEqual(dst.parent, self.c.TRASH_DIR)
-        self.assertFalse((self.c.CAMPAIGNS_DIR / cid).exists())
+        self.assertEqual(dst.parent, self.c.trash_dir(self.USER))
         self.assertIsNone(self.c.active_id(self.USER))
         self.assertEqual(self.c.list_for(self.USER), [])
 
     def test_pointer_to_a_trashed_campaign_resolves_to_none(self):
-        new = self.c.create(self.USER, self.party(), owner=self.USER).name
-        self.c.trash(new)
+        new = self.c.create(self.USER, self.party()).name
+        self.c.trash(self.USER, new)
         self.assertIsNone(self.c.active_id(self.USER))
         self.assertFalse(self.c.exists(self.USER))
 
@@ -418,25 +397,96 @@ class CampaignSwitchTests(unittest.TestCase):
         cid = "tg-991700002"
         self.c.create(991700002, self.party("Раз"), campaign_id=cid)
         self.c.create(991700002, self.party("Два"), campaign_id=cid)
-        self.assertEqual(self.c.read_party(cid)["party"][0]["name"], "Два")
-        self.assertFalse(self.c.TRASH_DIR.exists())
+        self.assertEqual(self.c.read_party(991700002, cid)["party"][0]["name"], "Два")
+        self.assertFalse(self.c.trash_dir(991700002).exists())
 
     def test_rename(self):
-        self.c.rename(f"tg-{self.USER}", "Дилион на острове")
+        self.c.rename(self.USER, self.first, "Дилион на острове")
         self.assertEqual(self.c.list_for(self.USER)[0]["title"], "Дилион на острове")
 
     def test_hostile_ids_refused(self):
         for bad in ("../etc", ".trash", "a/b", "", "X" * 5):
             self.assertFalse(self.c.valid_id(bad), bad)
-            self.assertIsNone(self.c.read_party(bad))
+            self.assertIsNone(self.c.read_party(self.USER, bad))
         with self.assertRaises(ValueError):
-            self.c.path("../../x")
+            self.c.path(self.USER, "../../x")
 
     def test_seed_note_is_not_copied_into_state(self):
-        cdir = self.c.create(self.USER, self.party(), owner=self.USER)
+        cdir = self.c.create(self.USER, self.party())
         state = (cdir / "state.md").read_text(encoding="utf-8")
         self.assertNotIn("НОВОГО прохождения", state)
         self.assertIn("## Current Situation", state)
+
+
+class FlatLayoutMigrationTests(unittest.TestCase):
+    """Campaigns from the flat campaigns/ + chats/ layout move under users/."""
+
+    @classmethod
+    def setUpClass(cls):
+        _import("config")
+        cls.c = _import("campaign")
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self._tmp.name)
+        self._saved = {k: getattr(self.c, k) for k in
+                       ("USERS_DIR", "LEGACY_CAMPAIGNS_DIR", "LEGACY_CHATS_DIR")}
+        self.c.USERS_DIR = self.root / "users"
+        self.c.LEGACY_CAMPAIGNS_DIR = self.root / "campaigns"
+        self.c.LEGACY_CHATS_DIR = self.root / "chats"
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(self.c, k, v)
+        self._tmp.cleanup()
+
+    def flat(self, rel, party):
+        import json
+        d = self.c.LEGACY_CAMPAIGNS_DIR / rel
+        d.mkdir(parents=True)
+        if party is not None:
+            (d / "party.json").write_text(json.dumps(party), encoding="utf-8")
+        (d / "state.md").write_text("состояние", encoding="utf-8")
+        return d
+
+    def test_moves_by_owner_then_chat_then_name(self):
+        self.flat("20260922-merri", {"owner": 7, "chat_id": 8, "party": []})
+        self.flat("tg-9", {"chat_id": 9, "party": []})
+        self.flat("tg-10", None)
+        self.c.migrate_flat_layout()
+        u = self.c.USERS_DIR
+        self.assertTrue((u / "7/campaigns/20260922-merri/state.md").is_file())
+        self.assertTrue((u / "9/campaigns/tg-9/state.md").is_file())
+        self.assertTrue((u / "10/campaigns/tg-10/state.md").is_file())
+        self.assertFalse(self.c.LEGACY_CAMPAIGNS_DIR.exists())
+
+    def test_trash_and_pointers_follow(self):
+        self.flat(".trash/20260901-a-20260922-174711", {"owner": 7, "party": []})
+        self.c.LEGACY_CHATS_DIR.mkdir()
+        (self.c.LEGACY_CHATS_DIR / "7.json").write_text('{"active": "x"}', encoding="utf-8")
+        self.c.migrate_flat_layout()
+        self.assertTrue((self.c.trash_dir(7) / "20260901-a-20260922-174711").is_dir())
+        self.assertTrue((self.c.USERS_DIR / "7" / "active.json").is_file())
+        self.assertFalse(self.c.LEGACY_CHATS_DIR.exists())
+
+    def test_the_active_campaign_survives_the_move(self):
+        self.flat("20260922-merri", {"owner": 7, "party": [{"name": "М"}]})
+        self.c.LEGACY_CHATS_DIR.mkdir()
+        (self.c.LEGACY_CHATS_DIR / "7.json").write_text(
+            '{"active": "20260922-merri"}', encoding="utf-8")
+        self.c.migrate_flat_layout()
+        self.assertEqual(self.c.active_id(7), "20260922-merri")
+
+    def test_unknown_owner_is_left_in_place(self):
+        d = self.flat("mystery", {"party": []})
+        self.c.migrate_flat_layout()
+        self.assertTrue(d.is_dir())
+
+    def test_second_run_does_nothing(self):
+        self.flat("tg-9", {"chat_id": 9, "party": []})
+        self.assertEqual(len(self.c.migrate_flat_layout()), 1)
+        self.assertEqual(self.c.migrate_flat_layout(), [])
 
 
 @unittest.skipUnless(HAVE_SDK, "claude-agent-sdk not installed in this interpreter")
@@ -638,10 +688,10 @@ class SandboxTests(unittest.TestCase):
 class CampaignPinTests(unittest.TestCase):
     """A helper script may only ever be pointed at the caller's own campaign.
 
-    The scripts take `--campaign NAME` and resolve it under the data root, so
-    before this rule a player could talk the DM into `tracker.py -c <someone
-    else's campaign> clear --all`. The data root is swapped for a temp one here
-    so the scripts really run and the test can look at what they touched.
+    The scripts take `--campaign NAME` and resolve it under their data root,
+    so before this rule a player could talk the DM into `tracker.py -c <someone
+    else's campaign> clear --all`. Two layers now: the scripts' root is the
+    player's own directory, and the name must be the chat's campaign.
     """
 
     @classmethod
@@ -653,16 +703,12 @@ class CampaignPinTests(unittest.TestCase):
     def setUp(self):
         import tempfile
         self.root = pathlib.Path(tempfile.mkdtemp())
-        self.mine = self.root / "campaigns" / "mine"
-        self.theirs = self.root / "campaigns" / "theirs"
-        for d in (self.mine, self.theirs):
+        self.mine = self.root / "users" / "1" / "campaigns" / "mine"
+        self.other = self.root / "users" / "1" / "campaigns" / "other"
+        self.theirs = self.root / "users" / "2" / "campaigns" / "theirs"
+        for d in (self.mine, self.other, self.theirs):
             d.mkdir(parents=True)
-        self._saved = (self.sb.DATA_ROOT, self.sb.CAMPAIGNS_DIR)
-        self.sb.DATA_ROOT, self.sb.CAMPAIGNS_DIR = self.root, self.root / "campaigns"
         self.box = self.sb.Sandbox(self.mine)
-
-    def tearDown(self):
-        self.sb.DATA_ROOT, self.sb.CAMPAIGNS_DIR = self._saved
 
     def why(self, args):
         return self.sb.check_command(
@@ -679,17 +725,17 @@ class CampaignPinTests(unittest.TestCase):
             f"python3 {self.scripts}/dice.py d20+5", self.mine))
 
     def test_other_campaign_refused_however_spelled(self):
-        for args in ("-c theirs status", "--campaign theirs status",
-                     "--campaign=theirs status", "-ctheirs status",
-                     "-c=theirs status", "--camp theirs status",
-                     "--c theirs status", "-c mine -c theirs status",
-                     "-c ../campaigns/theirs status", "-c .. status",
+        for args in ("-c other status", "--campaign other status",
+                     "--campaign=other status", "-cother status",
+                     "-c=other status", "--camp other status",
+                     "--c other status", "-c mine -c other status",
+                     "-c ../../2/campaigns/theirs status", "-c .. status",
                      "-c ../../.. status", "-c '' status", "status -c"):
             with self.subTest(args=args):
                 self.assertIsNotNone(self.why(args))
 
     def test_refusal_names_the_right_campaign(self):
-        self.assertIn("--campaign mine", self.why("-c theirs status"))
+        self.assertIn("--campaign mine", self.why("-c other status"))
 
     def test_other_campaign_untouched_end_to_end(self):
         (self.theirs / "tracker.json").write_text('{"x": 1}', encoding="utf-8")
@@ -698,6 +744,9 @@ class CampaignPinTests(unittest.TestCase):
         self.assertIn("ОТКАЗАНО", out)
         self.assertEqual((self.theirs / "tracker.json").read_text(encoding="utf-8"),
                          '{"x": 1}')
+
+    def test_scripts_are_rooted_at_the_player(self):
+        self.assertEqual(self.sb.script_root(self.mine), (self.root / "users" / "1").resolve())
 
     def test_own_campaign_runs_end_to_end(self):
         out = self.box.run("run_script", {

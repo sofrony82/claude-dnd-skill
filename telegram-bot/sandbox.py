@@ -32,7 +32,7 @@ import re
 import shlex
 import subprocess
 
-from config import CAMPAIGNS_DIR, DATA_ROOT, DND_SKILL_DIR, MODULE_DIR
+from config import DND_SKILL_DIR, MODULE_DIR
 
 # Helper scripts the DM may run. Anything outside this set is refused.
 # dm_engine imports this set and `check_command` — two backends, one rule.
@@ -108,8 +108,9 @@ def check_command(cmd: str, campaign_dir: pathlib.Path) -> str | None:
     """Why `cmd` may not run for this campaign, or None if it may.
 
     The shape rules are `bash_allowed`'s. On top of them, every campaign the
-    command names must resolve to `campaign_dir` itself — another player's
-    campaign, the data root, or a `../` walk out of it are all refused.
+    command names must resolve to `campaign_dir` itself — the player's other
+    campaigns, the data root, or a `../` walk out of it are all refused. Other
+    players' campaigns are out of reach anyway: see `script_root`.
     """
     scripts = ", ".join(sorted(ALLOWED_SCRIPTS))
     if not bash_allowed(cmd):
@@ -117,7 +118,7 @@ def check_command(cmd: str, campaign_dir: pathlib.Path) -> str | None:
                 f"({scripts}), одной командой без ';', '|', '&' и подстановок.")
     own = pathlib.Path(campaign_dir).resolve()
     for name in campaign_values(shlex.split(cmd)[2:]):
-        if not name or (CAMPAIGNS_DIR / name).resolve() != own:
+        if not name or (own.parent / name).resolve() != own:
             return (f"скрипты работают только с этой кампанией: "
                     f"--campaign {own.name}")
     return None
@@ -468,7 +469,7 @@ class Sandbox:
         try:
             r = subprocess.run(
                 argv, capture_output=True, text=True, timeout=SCRIPT_TIMEOUT,
-                cwd=str(self.campaign_dir), shell=False, env=_script_env(),
+                cwd=str(self.campaign_dir), shell=False, env=_script_env(self.campaign_dir),
             )
         except subprocess.TimeoutExpired:
             return f"ОШИБКА: скрипт не ответил за {SCRIPT_TIMEOUT} с."
@@ -481,16 +482,23 @@ class Sandbox:
         return (out or "[скрипт ничего не вывел]")[:8000]
 
 
-def _script_env() -> dict:
-    """The environment the helper scripts run in.
+def script_root(campaign_dir: pathlib.Path) -> pathlib.Path:
+    """The data root helper scripts get for this campaign: its player's own.
 
-    DND_CAMPAIGN_ROOT is pinned to the root `check_command` resolved campaign
-    names against: if the scripts looked somewhere else, the check would be
-    about a different directory than the one they write.
+    Campaigns live at users/<id>/campaigns/<name>/, and the scripts look for
+    `<root>/campaigns/<name>` — so with users/<id>/ as the root, no name they
+    are given can reach another player. It is also the root `check_command`
+    resolves names against; if the two differed, the check would be about a
+    different directory than the one the script writes.
     """
+    return pathlib.Path(campaign_dir).resolve().parent.parent
+
+
+def _script_env(campaign_dir: pathlib.Path) -> dict:
+    """The environment the helper scripts run in."""
     import os
     return {**os.environ,
-            "DND_CAMPAIGN_ROOT": str(DATA_ROOT),
+            "DND_CAMPAIGN_ROOT": str(script_root(campaign_dir)),
             "DND_DICE_PHYSICAL": "0"}
 
 
