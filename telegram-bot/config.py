@@ -78,8 +78,9 @@ MODEL = os.environ.get("DND_MODEL", "claude-opus-5")
 EFFORT = os.environ.get("DND_EFFORT", "medium")
 MAX_TURNS = int(os.environ.get("DND_MAX_TURNS", "40"))
 
-# Who may talk to the bot. Empty = anyone who finds it. A bot token in the
-# wrong hands is someone else spending your Claude quota, so set this.
+# Admins: they always play and approve everyone else (see access.py). Empty =
+# anyone who finds the bot plays. A bot token in the wrong hands is someone
+# else spending your quota, so set this.
 _allow = os.environ.get("TELEGRAM_ALLOWED_USERS", "").strip()
 ALLOWED_USERS = {int(x) for x in re.findall(r"-?\d+", _allow)} if _allow else set()
 

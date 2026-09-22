@@ -10,6 +10,9 @@ A player may keep several campaigns: /games lists them and switches the chat
 between them, /new starts another without touching the rest, and deleting one
 moves it to the trash rather than erasing it (see campaign.py).
 
+Access: admins from TELEGRAM_ALLOWED_USERS, everyone else by request — a
+stranger presses "request access", an admin approves with a button (access.py).
+
 Several players at once: updates from different chats run concurrently, a
 chat's own updates run in order (chat_lanes.py). Only private chats are
 served; the bot leaves any group it is added to.
@@ -30,6 +33,7 @@ import sys
 from telegram.error import NetworkError, TimedOut
 from telegram import (
     BotCommand,
+    BotCommandScopeChat,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Update,
@@ -45,13 +49,13 @@ from telegram.ext import (
     filters,
 )
 
+import access
 import campaign
 import chat_lanes
 import prompts
 import tg_format
 import transcript
 from config import (
-    ALLOWED_USERS,
     BACKEND,
     IDLE_CLOSE_MINUTES,
     MAX_PARTY,
@@ -99,6 +103,8 @@ MENU = [
     ("new", "Новая кампания (текущая сохранится)"),
     ("help", "Все команды"),
 ]
+# Admins also get this one in their menu.
+ADMIN_MENU = MENU + [("requests", "Запросы доступа и игроки")]
 
 
 def log_player(update: Update) -> None:
@@ -152,16 +158,28 @@ HELP = (
 
 # ── guards ───────────────────────────────────────────────────────────────
 def authorised(update: Update) -> bool:
-    if not ALLOWED_USERS:
-        return True
     user = update.effective_user
-    return bool(user and user.id in ALLOWED_USERS)
+    return bool(user) and access.is_allowed(user.id)
+
+
+REQUEST_KB = InlineKeyboardMarkup([[
+    InlineKeyboardButton("🙋 Запросить доступ", callback_data="acc:req")]])
 
 
 async def deny(update: Update):
-    await update.effective_message.reply_text(
-        "Этот бот приватный. Попроси владельца добавить твой Telegram ID."
-    )
+    """Tell an outsider where they stand, and offer the request button once."""
+    st = access.status(update.effective_user.id) if update.effective_user else "none"
+    if st == "pending":
+        text, kb = ("Запрос уже у владельца. Я напишу, как только придёт ответ.", None)
+    elif st == "denied":
+        text, kb = ("Владелец пока не открыл тебе доступ.", None)
+    else:
+        text, kb = ("Этот бот — закрытый стол: играют те, кого пустил владелец. "
+                    "Можно попросить доступ.", REQUEST_KB)
+    if update.callback_query is not None:
+        with contextlib.suppress(Exception):
+            await update.callback_query.answer()
+    await update.effective_message.reply_text(text, reply_markup=kb)
 
 
 GROUP_TEXT = ("Я вожу игру только в личных сообщениях — напиши мне напрямую. "
@@ -345,6 +363,105 @@ async def save_before_leaving(update: Update, context: ContextTypes.DEFAULT_TYPE
         log.warning("chat %s: DM did not write state before leaving; "
                     "the log tail will carry it", chat_id)
     return True
+
+
+# ── access requests ──────────────────────────────────────────────────────
+def _decision_kb(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Пустить", callback_data=f"acc:ok:{user_id}"),
+        InlineKeyboardButton("❌ Отказать", callback_data=f"acc:no:{user_id}"),
+    ]])
+
+
+async def on_access(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """`acc:*` buttons: a stranger asking in, an admin answering.
+
+    Runs ahead of the usual gate: whoever presses "request access" is by
+    definition not allowed yet. Admin buttons check the presser is an admin —
+    callback data is client-supplied.
+    """
+    q = update.callback_query
+    chat = update.effective_chat
+    if chat is None or chat.type != constants.ChatType.PRIVATE:
+        return await admitted(update, context)      # leaves the group
+    with contextlib.suppress(Exception):
+        await q.answer()
+    user = update.effective_user
+    data = q.data or ""
+
+    if data == "acc:req":
+        if access.is_allowed(user.id):
+            await q.edit_message_text("Доступ уже есть — жми /start.")
+            return
+        if not access.request(user.id, user.full_name or "", user.username or ""):
+            return await deny(update)
+        await q.edit_message_text(
+            "Запрос отправлен владельцу. Я напишу, как только придёт ответ.")
+        text = ("🙋 <b>Запрос доступа</b>\n"
+                + html.escape(access.label(user.id, {"name": user.full_name,
+                                                      "username": user.username})))
+        for admin in access.ADMINS:
+            # Silent: an admin in the middle of a scene should not get a buzz
+            # for it. The request waits in /requests too.
+            with contextlib.suppress(Exception):
+                await context.bot.send_message(
+                    admin, text, parse_mode=constants.ParseMode.HTML,
+                    reply_markup=_decision_kb(user.id), disable_notification=True)
+        return
+
+    if not access.is_admin(user.id):
+        return
+    try:
+        _, verb, uid = data.split(":", 2)
+        uid = int(uid)
+    except ValueError:
+        return
+    if verb == "ok":
+        rec = access.approve(uid)
+        note = "✅ Пущен"
+        with contextlib.suppress(Exception):
+            await context.bot.send_message(
+                uid, "✅ Владелец открыл тебе доступ. Жми /start — и в путь.")
+    elif verb in ("no", "rm"):
+        rec = access.refuse(uid)
+        note = "❌ Отказано" if verb == "no" else "🚫 Доступ снят"
+        if verb == "no":
+            with contextlib.suppress(Exception):
+                await context.bot.send_message(uid, "Владелец пока не открыл тебе доступ.")
+    else:
+        return
+    await q.edit_message_text(f"{note}: {html.escape(access.label(uid, rec))}",
+                              parse_mode=constants.ParseMode.HTML)
+
+
+async def cmd_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin view: pending requests to decide, players to revoke, recent refusals."""
+    if not await admitted(update, context):
+        return
+    if not access.is_admin(update.effective_user.id):
+        await update.effective_message.reply_text(HELP, parse_mode=constants.ParseMode.HTML)
+        return
+    if not access.ADMINS:
+        await update.effective_message.reply_text(
+            "TELEGRAM_ALLOWED_USERS не задан — бот открыт всем, запросов нет.")
+        return
+    lists = access.listing()
+    reply = update.effective_message.reply_text
+    if not lists["pending"]:
+        await reply("Новых запросов нет.")
+    for uid, rec in lists["pending"]:
+        await reply(f"🙋 {html.escape(access.label(uid, rec))}",
+                    parse_mode=constants.ParseMode.HTML, reply_markup=_decision_kb(uid))
+    for uid, rec in lists["allowed"]:
+        await reply(f"🎲 Играет: {html.escape(access.label(uid, rec))}",
+                    parse_mode=constants.ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                        "🚫 Снять доступ", callback_data=f"acc:rm:{uid}")]]))
+    for uid, rec in lists["denied"][:10]:
+        await reply(f"⛔ Отказано: {html.escape(access.label(uid, rec))}",
+                    parse_mode=constants.ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                        "✅ Всё-таки пустить", callback_data=f"acc:ok:{uid}")]]))
 
 
 # ── onboarding ───────────────────────────────────────────────────────────
@@ -812,6 +929,9 @@ async def post_init(app: Application):
         app.bot_data["sweeper"] = asyncio.create_task(sweep_idle_sessions())
     try:
         await app.bot.set_my_commands([BotCommand(c, d) for c, d in MENU])
+        for admin in access.ADMINS:
+            await app.bot.set_my_commands([BotCommand(c, d) for c, d in ADMIN_MENU],
+                                          scope=BotCommandScopeChat(admin))
     except Exception as e:                          # noqa: BLE001
         log.warning("could not set the command menu: %s", e)
 
@@ -853,6 +973,8 @@ def main():
     app.add_handler(CommandHandler("recap", cmd_recap))
     app.add_handler(CommandHandler("save", cmd_save))
     app.add_handler(CommandHandler("reset", cmd_reset))
+    app.add_handler(CommandHandler("requests", cmd_requests))
+    app.add_handler(CallbackQueryHandler(on_access, pattern=r"^acc:"))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(ChatMemberHandler(on_membership, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

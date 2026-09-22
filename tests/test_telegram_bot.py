@@ -1078,3 +1078,64 @@ class IdleSessionTests(unittest.TestCase):
                 self.assertEqual(self.reg.idle(1800), [])
 
         asyncio.run(go())
+
+
+class AccessTests(unittest.TestCase):
+    """Who gets in: admins always, others once an admin approves."""
+
+    ADMIN, STRANGER = 1, 42
+
+    @classmethod
+    def setUpClass(cls):
+        _import("config")
+        cls.a = _import("access")
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self._saved = (self.a.ACCESS_FILE, self.a.ADMINS)
+        self.a.ACCESS_FILE = pathlib.Path(self._tmp.name) / "access.json"
+        self.a.ADMINS = {self.ADMIN}
+
+    def tearDown(self):
+        self.a.ACCESS_FILE, self.a.ADMINS = self._saved
+        self._tmp.cleanup()
+
+    def test_admin_in_stranger_out(self):
+        self.assertTrue(self.a.is_allowed(self.ADMIN))
+        self.assertFalse(self.a.is_allowed(self.STRANGER))
+        self.assertEqual(self.a.status(self.STRANGER), "none")
+
+    def test_no_admins_means_open(self):
+        self.a.ADMINS = set()
+        self.assertTrue(self.a.is_allowed(self.STRANGER))
+
+    def test_request_is_recorded_once(self):
+        self.assertTrue(self.a.request(self.STRANGER, "Мерри", "merri"))
+        self.assertFalse(self.a.request(self.STRANGER, "Мерри", "merri"))
+        self.assertEqual(self.a.status(self.STRANGER), "pending")
+        self.assertFalse(self.a.is_allowed(self.STRANGER))
+
+    def test_approve_lets_in_without_restart(self):
+        self.a.request(self.STRANGER, "Мерри", "merri")
+        rec = self.a.approve(self.STRANGER)
+        self.assertEqual(rec["name"], "Мерри")
+        self.assertTrue(self.a.is_allowed(self.STRANGER))
+        self.assertEqual([u for u, _ in self.a.listing()["allowed"]], [self.STRANGER])
+        self.assertEqual(self.a.listing()["pending"], [])
+
+    def test_refused_cannot_re_request(self):
+        self.a.request(self.STRANGER, "Мерри", "")
+        self.a.refuse(self.STRANGER)
+        self.assertFalse(self.a.request(self.STRANGER, "Мерри", ""))
+        self.assertEqual(self.a.status(self.STRANGER), "denied")
+
+    def test_revoke_shuts_out(self):
+        self.a.approve(self.STRANGER)
+        self.a.refuse(self.STRANGER)
+        self.assertFalse(self.a.is_allowed(self.STRANGER))
+
+    def test_broken_file_keeps_strangers_out(self):
+        self.a.ACCESS_FILE.write_text("{not json", encoding="utf-8")
+        self.assertFalse(self.a.is_allowed(self.STRANGER))
+        self.assertTrue(self.a.is_allowed(self.ADMIN))

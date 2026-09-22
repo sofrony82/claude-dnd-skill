@@ -260,8 +260,11 @@ curl -s localhost:8000/health | jq '{module_dir, module_missing}'
 Usually this is `DND_CAMPAIGN_ROOT` pointing at the wrong home directory —
 a service running as a different user than the one you copied the pack for.
 
-**`Этот бот приватный`** — your Telegram id is not in
-`TELEGRAM_ALLOWED_USERS`. Ask [@userinfobot](https://t.me/userinfobot) for it.
+**`Этот бот — закрытый стол`** — the user is neither an admin
+(`TELEGRAM_ALLOWED_USERS`; ask [@userinfobot](https://t.me/userinfobot) for the id)
+nor approved in `~/.claude/dnd/access.json`. They can press the request button;
+an admin answers from the silent message or `/requests`. `grep access` the
+journal to see requests and decisions.
 
 ### It plays, but badly
 

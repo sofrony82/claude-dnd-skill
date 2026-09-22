@@ -58,7 +58,15 @@ The token is read from `$TELEGRAM_BOT_TOKEN`, then `telegram-bot/.env`, then
 
 **Set `TELEGRAM_ALLOWED_USERS`.** Without it anyone who finds the bot can play
 on your Claude quota. Put your numeric Telegram user id there (ask
-[@userinfobot](https://t.me/userinfobot)); comma-separate several.
+[@userinfobot](https://t.me/userinfobot)); comma-separate several. These are the
+**admins**: they always play and they decide who else may.
+
+Everyone else asks. A stranger who writes to the bot gets a "🙋 Запросить
+доступ" button; pressing it sends each admin a silent message with ✅/❌. `/requests`
+(in the admins' menu only) lists pending requests, current players with a
+"revoke" button, and recent refusals. Decisions are kept in
+`~/.claude/dnd/access.json` and take effect at once, no restart. A refused or
+revoked user cannot ask again until an admin lets them in from `/requests`.
 
 ## Run
 
@@ -190,7 +198,7 @@ is closed; the next message reopens it from the files and the log.
 | Variable | Default | |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | — | required |
-| `TELEGRAM_ALLOWED_USERS` | *(empty — open to all)* | comma-separated user ids |
+| `TELEGRAM_ALLOWED_USERS` | *(empty — open to all)* | admin user ids, comma-separated; others get in by request |
 | `DND_MODULE` | `stormwreck-isle` | which pack under `modules/` to run |
 | `DND_MODEL` | `claude-opus-5` | `claude-sonnet-5` is faster and cheaper |
 | `DND_EFFORT` | `medium` | `low` \| `medium` \| `high` |
