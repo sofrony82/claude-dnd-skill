@@ -271,6 +271,13 @@ nor approved in `~/.claude/dnd/access.json`. They can press the request button;
 an admin answers from the silent message or `/requests`. `grep access` the
 journal to see requests and decisions.
 
+To let friends in without the request round-trip, an admin sends
+`/invite @nick1 @nick2 …`. Nothing is sent to them (a bot cannot write first);
+each is let in the first time they write, and the admins get a silent note.
+`/invite` alone lists who has not come yet, with a button to withdraw. The
+invitation is by username, so it is used up on first contact and from then on
+the player is an id in `allowed` like everyone else.
+
 ### It plays, but badly
 
 | Symptom | What is happening | Fix |

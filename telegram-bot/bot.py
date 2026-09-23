@@ -107,6 +107,7 @@ MENU = [
 ]
 # Admins also get this one in their menu.
 ADMIN_MENU = MENU + [("requests", "Запросы доступа и игроки"),
+                     ("invite", "Пригласить по @нику"),
                      ("usage", "Расход запросов к модели")]
 
 LIMIT_TEXT = ("🌙 Мастер на сегодня выдохся: у бота кончился дневной запас "
@@ -216,9 +217,24 @@ async def admitted(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
         if chat is not None:
             await leave_group(context, chat.id)
         return False
-    if not authorised(update):
+    if not authorised(update) and not await let_in_invited(update, context):
         await deny(update)
         return False
+    return True
+
+
+async def let_in_invited(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Admit someone an admin invited by @username, and tell the admins."""
+    user = update.effective_user
+    if user is None or not access.redeem(user.id, user.full_name or "", user.username or ""):
+        return False
+    text = ("🎟 <b>Зашёл по приглашению</b>\n"
+            + html.escape(access.label(user.id, {"name": user.full_name,
+                                                  "username": user.username})))
+    for admin in access.ADMINS:
+        with contextlib.suppress(Exception):
+            await context.bot.send_message(admin, text, parse_mode=constants.ParseMode.HTML,
+                                           disable_notification=True)
     return True
 
 
@@ -426,7 +442,7 @@ async def on_access(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data or ""
 
     if data == "acc:req":
-        if access.is_allowed(user.id):
+        if access.is_allowed(user.id) or await let_in_invited(update, context):
             await q.edit_message_text("Доступ уже есть — жми /start.")
             return
         if not access.request(user.id, user.full_name or "", user.username or ""):
@@ -446,6 +462,12 @@ async def on_access(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not access.is_admin(user.id):
+        return
+    if data.startswith("acc:unv:"):
+        name = data.split(":", 2)[2]
+        note = "Приглашение отозвано" if access.uninvite(name) else "Приглашения уже нет"
+        await q.edit_message_text(f"{note}: @{html.escape(name)}",
+                                  parse_mode=constants.ParseMode.HTML)
         return
     try:
         _, verb, uid = data.split(":", 2)
@@ -498,6 +520,40 @@ async def cmd_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode=constants.ParseMode.HTML,
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
                         "✅ Всё-таки пустить", callback_data=f"acc:ok:{uid}")]]))
+
+
+INVITE_HELP = ("Пригласить по нику: <code>/invite @ник1 @ник2 …</code>\n"
+               "Бот никому не пишет сам. Приглашённый попадёт в игру без запроса, "
+               "как только сам откроет бота — а тебе придёт тихое сообщение.")
+
+
+async def cmd_invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: invite @usernames ahead of time, and list who is still invited."""
+    if not await admitted(update, context):
+        return
+    if not access.is_admin(update.effective_user.id):
+        await update.effective_message.reply_text(HELP, parse_mode=constants.ParseMode.HTML)
+        return
+    reply = update.effective_message.reply_text
+    if context.args:
+        res = access.invite(context.args)
+        lines = []
+        if res["added"]:
+            lines.append("🎟 Приглашены: " + ", ".join(f"@{n}" for n in res["added"]))
+        if res["playing"]:
+            lines.append("Уже играют: " + ", ".join(f"@{n}" for n in res["playing"]))
+        if res["invalid"]:
+            lines.append("Не похоже на ник: " + ", ".join(res["invalid"]))
+        if not lines:
+            lines.append("Все эти ники уже приглашены.")
+        await reply("\n".join(lines))
+        return
+    invited = access.invitations()
+    await reply((f"Ждут первого сообщения: {len(invited)}.\n\n" if invited else "")
+                + INVITE_HELP, parse_mode=constants.ParseMode.HTML)
+    for name, _ in invited:
+        await reply(f"🎟 @{name}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+            "✖ Отозвать", callback_data=f"acc:unv:{name}")]]))
 
 
 def _n(x: int) -> str:
@@ -1044,6 +1100,7 @@ def main():
     app.add_handler(CommandHandler("save", cmd_save))
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("requests", cmd_requests))
+    app.add_handler(CommandHandler("invite", cmd_invite))
     app.add_handler(CommandHandler("usage", cmd_usage))
     app.add_handler(CallbackQueryHandler(on_access, pattern=r"^acc:"))
     app.add_handler(CallbackQueryHandler(on_callback))

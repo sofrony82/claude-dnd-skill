@@ -1356,6 +1356,42 @@ class AccessTests(unittest.TestCase):
         self.assertFalse(self.a.is_allowed(self.STRANGER))
         self.assertTrue(self.a.is_allowed(self.ADMIN))
 
+    def test_invitation_lets_in_on_first_contact_once(self):
+        res = self.a.invite(["@Merri_Brandybuck"])
+        self.assertEqual(res["added"], ["merri_brandybuck"])
+        self.assertFalse(self.a.is_allowed(self.STRANGER))
+        # Usernames are case-insensitive; the stored one keeps its case.
+        self.assertTrue(self.a.redeem(self.STRANGER, "Мерри", "merri_BRANDYBUCK"))
+        self.assertTrue(self.a.is_allowed(self.STRANGER))
+        self.assertEqual(self.a.invitations(), [])
+        # Used up: a revoke sticks, the name does not let them back in.
+        self.a.refuse(self.STRANGER)
+        self.assertFalse(self.a.redeem(self.STRANGER, "Мерри", "merri_brandybuck"))
+        self.assertFalse(self.a.is_allowed(self.STRANGER))
+
+    def test_invitation_needs_the_right_username(self):
+        self.a.invite(["merri_b"])
+        self.assertFalse(self.a.redeem(self.STRANGER, "Пиппин", "pippin_t"))
+        self.assertFalse(self.a.redeem(self.STRANGER, "Без ника", ""))
+        self.assertEqual([n for n, _ in self.a.invitations()], ["merri_b"])
+
+    def test_invite_sorts_names(self):
+        self.a.approve(self.STRANGER)
+        data = self.a.load()
+        data["allowed"][str(self.STRANGER)]["username"] = "Merri_B"
+        self.a._save(data)
+        res = self.a.invite(["merri_b", "pippin_t", "@Pippin_T", "x", "bad name!"])
+        self.assertEqual(res, {"added": ["pippin_t"], "playing": ["merri_b"],
+                               "invalid": ["x", "bad name!"]})
+        self.assertTrue(self.a.uninvite("@PIPPIN_T"))
+        self.assertFalse(self.a.uninvite("pippin_t"))
+
+    def test_invitations_survive_other_decisions(self):
+        self.a.invite(["merri_b"])
+        self.a.request(self.STRANGER, "Пиппин", "")
+        self.a.approve(self.STRANGER)
+        self.assertEqual([n for n, _ in self.a.invitations()], ["merri_b"])
+
 
 class DailyBudgetTests(unittest.TestCase):
     """The bot-wide daily budget of Chat Completions requests."""
