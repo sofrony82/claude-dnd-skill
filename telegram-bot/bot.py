@@ -1055,7 +1055,10 @@ def main():
     log.info("Module pack: %s", MODULE_DIR)
     log.info("Players:     %s", campaign.USERS_DIR)
     log.info("Polling…")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    # Pending updates are kept: a move typed while the bot restarts is answered
+    # once it is back, instead of vanishing without a reply. A backlog after a
+    # long outage is bounded by the per-chat lane (chat_lanes.MAX_QUEUED).
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":

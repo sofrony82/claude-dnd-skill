@@ -95,6 +95,11 @@ files — but the DM will have to re-read them, and the player sees a DM that ha
 forgotten the last ten minutes. Restart at a lull, and prefer `/save` in the
 chat first.
 
+No move is dropped by a restart itself. On stop the bot stops fetching, then
+finishes every turn already running or queued (`TimeoutStopSec=300` gives a
+slow one room before SIGKILL); messages typed while it is down wait at Telegram
+and are answered once it is back up.
+
 ### Reaching the API server
 
 It binds `127.0.0.1` and has no authentication of its own, because it drives an

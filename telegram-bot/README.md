@@ -269,6 +269,9 @@ WorkingDirectory=/path/to/claude-dnd-skill/telegram-bot
 ExecStart=/path/to/telegram-bot/.venv/bin/python bot.py
 Restart=on-failure
 RestartSec=10
+# On stop the bot finishes the DM turns already running; a slow one can pass
+# systemd's default 90 s, and a SIGKILL mid-turn leaves the player unanswered.
+TimeoutStopSec=300
 ```
 
 ```ini
